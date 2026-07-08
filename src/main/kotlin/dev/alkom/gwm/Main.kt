@@ -1,6 +1,7 @@
 package dev.alkom.gwm
 
 import com.github.ajalt.clikt.core.CliktCommand
+import com.github.ajalt.clikt.core.CliktError
 import com.github.ajalt.clikt.core.main
 import com.github.ajalt.clikt.core.subcommands
 import com.github.ajalt.clikt.parameters.arguments.argument
@@ -18,7 +19,9 @@ import dev.alkom.gwm.git.WorktreeService
 import dev.alkom.gwm.git.WorktreeService.RemoveStatus
 import dev.alkom.gwm.scan.RepoScanner
 import dev.alkom.gwm.scan.ScanService
+import dev.alkom.gwm.scan.WorktreeMatcher
 import dev.alkom.gwm.ui.InteractiveScreen
+import dev.alkom.gwm.ui.ShellInit
 import dev.alkom.gwm.ui.WorktreeTable
 import java.io.File
 
@@ -26,14 +29,79 @@ import java.io.File
  * gwm — git worktree manager (TUI).
  *
  * Фаза 1 (single repo): `list` (static table), `interactive` (selectable screen),
- * `create` (new worktree) and `remove` (safe deletion). Multi-repo scanning and
- * orphaned-worktree detection arrive in later Этапы (see docs/PLAN.md).
+ * `create` (new worktree) and `remove` (safe deletion). Multi-repo scanning,
+ * orphaned-worktree detection and the cwd-switch helpers (Этап 6) are layered on top
+ * (see docs/PLAN.md).
+ *
+ * The `--print-path <fuzzy>` option lives on the ROOT command, not as a subcommand, on
+ * purpose: Clikt reserves leading-dash tokens for options, so a subcommand literally named
+ * `--print-path` can never be dispatched. Modelling it as a root option preserves the exact
+ * `gwm --print-path foo` UX the shell wrapper depends on (docs/TECHNICAL_PLAN §5). We set
+ * [invokeWithoutSubcommand] so [run] fires even when no subcommand follows the option.
  */
 class Gwm : CliktCommand(name = "gwm") {
+    override val invokeWithoutSubcommand: Boolean = true
+
+    private val printPath: String? by option(
+        "--print-path",
+        help = "напечатать абсолютный путь worktree по неточному имени (для `cd \$(gwm --print-path ...)`) и выйти",
+        metavar = "FUZZY",
+    )
+    private val root: String? by option(
+        "--root",
+        help = "корень портфеля репозиториев (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
+    )
+
     override fun help(context: com.github.ajalt.clikt.core.Context) =
         "TUI-менеджер git worktree по локальным репозиториям"
 
-    override fun run() = Unit
+    override fun run() {
+        val query = printPath ?: return
+        // Machine-readable path resolution; prints exactly the path to stdout or throws a
+        // CliktError (stderr + non-zero exit). See PrintPath.emit for the WHY.
+        PrintPath.emit(query, root)
+    }
+}
+
+/**
+ * The `--print-path` resolution, factored out of [Gwm] so the exit-code/stderr contract is
+ * defined in one place. Scans the portfolio, resolves the fuzzy [query] via
+ * [WorktreeMatcher] and either prints ONE absolute path to plain stdout or raises a
+ * [CliktError].
+ *
+ * WHY the path is written with a raw [println] (not Mordant): a shell command substitution
+ * `cd "$(gwm --print-path foo)"` captures stdout verbatim, so any color codes would corrupt
+ * the path. We emit exactly `<absolute-path>\n` and route every diagnostic to stderr.
+ *
+ * WHY failures exit non-zero and print NOTHING to stdout: on an empty/failed lookup we must
+ * not emit a blank line, because `cd "$(...)"` on empty output can drop the user in $HOME. A
+ * [CliktError] writes to stderr and exits non-zero, so the wrapper's `&&`-guard suppresses
+ * the `cd` entirely (see [ShellInit]).
+ */
+object PrintPath {
+    fun emit(query: String, root: String?) {
+        val rootDir = RepoScanner.resolveRoot(root)
+        val repos = RepoScanner.findRepos(rootDir)
+        val worktrees = ScanService().scan(repos).worktrees
+
+        when (val match = WorktreeMatcher.resolve(worktrees, query)) {
+            is WorktreeMatcher.Match.Found ->
+                println(File(match.worktree.worktree.path).absolutePath)
+
+            is WorktreeMatcher.Match.None ->
+                throw CliktError("Worktree не найден по запросу: '${match.query}'")
+
+            is WorktreeMatcher.Match.Ambiguous -> {
+                val candidates = match.candidates.joinToString("\n") { c ->
+                    "  ${c.repo}/${c.worktree.label} → ${File(c.worktree.path).absolutePath}"
+                }
+                throw CliktError(
+                    "Неоднозначный запрос '${match.query}' — подходит несколько worktree:\n" +
+                        "$candidates\nУточните имя.",
+                )
+            }
+        }
+    }
 }
 
 /** Shared helper: resolve a [WorktreeService] for a repo path or bail with a message. */
@@ -162,6 +230,21 @@ class ScanCommand : CliktCommand(name = "scan") {
     }
 }
 
+/**
+ * `gwm shell-init` — prints the shell-function wrapper to install once via
+ * `eval "$(gwm shell-init)"`. See [ShellInit] for why the wrapper (and its success-guard)
+ * are needed. `gwm` only PRINTS the snippet; it never touches the user's dotfiles.
+ */
+class ShellInitCommand : CliktCommand(name = "shell-init") {
+    override fun help(context: com.github.ajalt.clikt.core.Context) =
+        "Напечатать shell-функцию для .bashrc/.zshrc: eval \"\$(gwm shell-init)\" → `gwm cd <fuzzy>`"
+
+    override fun run() {
+        // Raw stdout so `eval` gets clean, unstyled shell code.
+        println(ShellInit.snippet())
+    }
+}
+
 fun main(args: Array<String>) =
     Gwm().subcommands(
         ListCommand(),
@@ -169,4 +252,5 @@ fun main(args: Array<String>) =
         CreateCommand(),
         RemoveCommand(),
         ScanCommand(),
+        ShellInitCommand(),
     ).main(args)
