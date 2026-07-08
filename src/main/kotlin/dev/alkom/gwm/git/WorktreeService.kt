@@ -68,10 +68,15 @@ class WorktreeService(
      */
     fun withOrphanStatus(worktrees: List<Worktree>): List<Worktree> {
         val base = baseBranch()
+        // One `git branch --merged` call for the whole repo, not one per worktree:
+        // the command already returns every merged branch in a single pass, so
+        // re-running it N times (found by independent /code-review) was N-1
+        // redundant subprocesses for no extra information.
+        val merged = base?.let { mergedBranches(it) } ?: emptySet()
         return worktrees.map { wt ->
-            val merged = wt.branch != null && base != null && wt.branch != base && isMerged(wt.branch, base)
+            val isMerged = wt.branch != null && base != null && wt.branch != base && wt.branch in merged
             val noUpstream = wt.branch != null && !hasUpstream(wt.branch)
-            wt.copy(orphan = OrphanClassifier.classify(wt, merged = merged, noUpstream = noUpstream))
+            wt.copy(orphan = OrphanClassifier.classify(wt, merged = isMerged, noUpstream = noUpstream))
         }
     }
 
@@ -79,6 +84,12 @@ class WorktreeService(
      * The repository's base branch — `main` or `master`, whichever exists as a local
      * ref (preferring `main`). Used as the target for the "branch already merged" check.
      * Returns null when neither is present, in which case the merged signal is skipped.
+     *
+     * Known limitation (flagged by independent /code-review): repos whose trunk is
+     * neither `main` nor `master` (e.g. `develop`) get no merged-signal at all — this
+     * is a silent false-negative, never a false-positive, which matches the "hint,
+     * never autodelete" principle (PLAN §4/§5): understating staleness is safe,
+     * overstating it is not.
      */
     fun baseBranch(): String? {
         for (candidate in listOf("main", "master")) {
@@ -89,14 +100,15 @@ class WorktreeService(
     }
 
     /**
-     * True if [branch] is fully merged into [base]. Uses `git branch --merged <base>`,
-     * which lists exactly the local branches whose tip is reachable from [base] — i.e.
-     * whose work already lives on the base branch and can be safely dropped.
+     * The set of local branches fully merged into [base]. Uses `git branch --merged
+     * <base>` — one call per repo (not per worktree, see [withOrphanStatus]) — which
+     * lists exactly the local branches whose tip is reachable from [base], i.e. whose
+     * work already lives on the base branch and can be safely dropped.
      */
-    private fun isMerged(branch: String, base: String): Boolean {
+    private fun mergedBranches(base: String): Set<String> {
         val res = git(repoDir, listOf("branch", "--merged", base, "--format=%(refname:short)"))
-        if (!res.ok) return false
-        return res.stdout.lineSequence().map { it.trim() }.any { it == branch }
+        if (!res.ok) return emptySet()
+        return res.stdout.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toSet()
     }
 
     /**
