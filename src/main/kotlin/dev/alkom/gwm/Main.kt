@@ -56,7 +56,7 @@ class ListCommand : CliktCommand(name = "list") {
 
     override fun run() {
         val service = openRepo(terminal, repo) ?: return
-        val worktrees = service.withDirtyFlags(service.list())
+        val worktrees = service.withOrphanStatus(service.withDirtyFlags(service.list()))
         terminal.println(bold("Worktrees: ${File(repo).absoluteFile.name}"))
         terminal.println(WorktreeTable.render(worktrees))
     }

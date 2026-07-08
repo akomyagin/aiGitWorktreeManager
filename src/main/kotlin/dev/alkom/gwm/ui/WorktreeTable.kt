@@ -25,13 +25,38 @@ object WorktreeTable {
         null -> gray("?")
     }
 
+    /**
+     * Colored orphaned/stale badge for a worktree (Этап 5), or a blank cell when the
+     * worktree looks active. Uses [brightYellow] — the same "attention, not error" hue
+     * as the dirty marker — and lists the concrete signals so the human can judge
+     * ("merged" reads very differently from "prunable"). This is a hint only: `gwm`
+     * never deletes anything on its own.
+     */
+    fun orphanCell(wt: Worktree): String =
+        if (wt.orphan.isOrphaned) {
+            brightYellow("⚠ ${wt.orphan.reasons.joinToString("/")}")
+        } else {
+            gray("")
+        }
+
+    /**
+     * One-line, safe-to-delete hint for orphaned worktrees, or null when active.
+     * Purely advisory text — the user still has to trigger removal explicitly.
+     */
+    fun orphanHint(wt: Worktree): String? =
+        if (wt.orphan.isOrphaned) {
+            "безопасно удалить (${wt.orphan.reasons.joinToString(", ")})"
+        } else {
+            null
+        }
+
     /** Full table widget for a list of worktrees. */
     fun render(worktrees: List<Worktree>): Widget = table {
-        header { row("Ветка", "Статус", "Путь") }
+        header { row("Ветка", "Статус", "Orphaned", "Путь") }
         body {
             worktrees.forEach { wt ->
                 val branchCell = if (wt.isMain) bold(wt.label) else wt.label
-                row(branchCell, statusCell(wt), gray(wt.path))
+                row(branchCell, statusCell(wt), orphanCell(wt), gray(wt.path))
             }
         }
     }
@@ -46,12 +71,12 @@ object WorktreeTable {
      * one branchy one.
      */
     fun renderAggregated(worktrees: List<AggregatedWorktree>): Widget = table {
-        header { row("Репозиторий", "Ветка", "Статус", "Путь") }
+        header { row("Репозиторий", "Ветка", "Статус", "Orphaned", "Путь") }
         body {
             worktrees.forEach { agg ->
                 val wt = agg.worktree
                 val branchCell = if (wt.isMain) bold(wt.label) else wt.label
-                row(bold(agg.repo), branchCell, statusCell(wt), gray(wt.path))
+                row(bold(agg.repo), branchCell, statusCell(wt), orphanCell(wt), gray(wt.path))
             }
         }
     }

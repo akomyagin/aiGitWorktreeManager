@@ -1,9 +1,11 @@
 package dev.alkom.gwm
 
+import dev.alkom.gwm.git.OrphanStatus
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.ui.InteractiveScreen
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -38,5 +40,17 @@ class InteractiveScreenTest {
     fun `rowLabel uses dirty and unknown markers`() {
         assertTrue(InteractiveScreen.rowLabel(wt("/a", "b", dirty = true)).startsWith("●"))
         assertTrue(InteractiveScreen.rowLabel(wt("/a", "b", dirty = null)).startsWith("?"))
+    }
+
+    @Test
+    fun `rowLabel appends the orphaned badge only when stale`() {
+        val active = InteractiveScreen.rowLabel(wt("/a", "b", dirty = false))
+        assertFalse("⚠" in active)
+
+        val stale = wt("/a", "b", dirty = false)
+            .copy(orphan = OrphanStatus(merged = true, noUpstream = true))
+        val label = InteractiveScreen.rowLabel(stale)
+        assertTrue("⚠" in label)
+        assertTrue("merged/no-upstream" in label)
     }
 }
