@@ -1,6 +1,7 @@
 package dev.alkom.gwm.git
 
 import java.io.File
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -31,10 +32,24 @@ object GitCommand {
         vararg args: String,
         timeoutSeconds: Long = DEFAULT_TIMEOUT_SECONDS,
     ): GitResult {
-        val process = ProcessBuilder(listOf("git", *args))
-            .directory(workingDir)
-            .redirectErrorStream(false)
-            .start()
+        // workingDir can legitimately not exist: an orphaned/prunable worktree's
+        // folder may have been deleted manually while git still lists it. That is
+        // a core scenario this tool targets, not an exceptional one — ProcessBuilder
+        // throws IOException when .directory() points at a missing path, so we
+        // turn that into a normal failed GitResult instead of letting it crash
+        // list/interactive/safeRemove.
+        val process = try {
+            ProcessBuilder(listOf("git", *args))
+                .directory(workingDir)
+                .redirectErrorStream(false)
+                .start()
+        } catch (e: IOException) {
+            return GitResult(
+                exitCode = -1,
+                stdout = "",
+                stderr = "failed to start git in ${workingDir}: ${e.message}",
+            )
+        }
 
         val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
         if (!finished) {

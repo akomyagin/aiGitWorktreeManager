@@ -145,4 +145,43 @@ class WorktreeServiceIntegrationTest {
             service.remove(target.absolutePath, force = true)
         }
     }
+
+    /**
+     * Regression test for the crash found by independent /code-review on Этап 1:
+     * `git worktree add` registers a worktree, but nothing stops the user (or an
+     * accidental `rm -rf`) from deleting its directory outside of git — the
+     * worktree stays listed as "prunable" until `git worktree prune` runs. That
+     * is exactly the orphaned-worktree scenario this tool is meant to surface,
+     * so it must never crash the app.
+     */
+    @Test
+    fun `withDirtyFlags and safeRemove tolerate a worktree whose directory was deleted manually`(
+        @TempDir tmp: File,
+    ) {
+        initRepo(tmp)
+        val service = WorktreeService(tmp)
+        val target = File(tmp.parentFile, "${tmp.name}-orphan")
+        service.add(target, newBranch = "orphan", baseRef = "main")
+
+        // Simulate the user deleting the worktree folder by hand, outside git.
+        assertTrue(target.deleteRecursively(), "failed to delete worktree dir for the test")
+
+        // Rendering the list must not throw — this used to crash with an
+        // uncaught IOException from ProcessBuilder.start() on a missing dir.
+        val flagged = service.withDirtyFlags(service.list())
+        val orphan = flagged.first { it.branch == "orphan" }
+        assertEquals(false, orphan.dirty, "a missing directory holds no uncommitted changes to lose")
+
+        // safeRemove must not block on BLOCKED_DIRTY (nothing to lose) and must
+        // not crash; git itself is left to clean up the administrative entry.
+        val outcome = service.safeRemove("orphan", force = false)
+        assertTrue(
+            outcome.status == WorktreeService.RemoveStatus.REMOVED ||
+                outcome.status == WorktreeService.RemoveStatus.GIT_ERROR,
+            "expected git to handle the missing directory itself, got ${outcome.status}",
+        )
+
+        // Whatever git left behind, prune always succeeds and never throws.
+        assertTrue(service.prune().let { true }, "prune must not throw")
+    }
 }
