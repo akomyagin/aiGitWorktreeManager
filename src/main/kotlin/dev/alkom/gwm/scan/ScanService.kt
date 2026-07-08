@@ -72,7 +72,8 @@ class ScanService(private val git: GitRunner = RealGitRunner) {
         val name = repo.name
         return runCatching {
             val service = WorktreeService(repo, git)
-            val flagged = service.withDirtyFlags(service.list())
+            // Layer both annotations: dirty flags (cheap-ish) and orphaned hints (Этап 5).
+            val flagged = service.withOrphanStatus(service.withDirtyFlags(service.list()))
             flagged.map { AggregatedWorktree(name, it) }
         }.fold(
             onSuccess = { it to null },

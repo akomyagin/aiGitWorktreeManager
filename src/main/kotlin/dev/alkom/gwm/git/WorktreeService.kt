@@ -54,6 +54,60 @@ class WorktreeService(
     }
 
     /**
+     * Annotates each worktree with its [OrphanStatus] (Этап 5) — a *hint* about
+     * whether it looks stale (branch merged into base / no upstream / prunable).
+     * Kept separate from [list]/[withDirtyFlags] because it costs extra git calls
+     * per worktree, and callers may want the cheaper listing first.
+     *
+     * This is purely informational: it never removes anything and does not touch
+     * [safeRemove]/[remove]. `gwm` never deletes a worktree on its own (PLAN §4/§5).
+     *
+     * The merged/upstream probes run against the repo the worktrees belong to, using
+     * this service's [git] runner — no git-call logic is duplicated, and the raw facts
+     * are combined by the pure [OrphanClassifier].
+     */
+    fun withOrphanStatus(worktrees: List<Worktree>): List<Worktree> {
+        val base = baseBranch()
+        return worktrees.map { wt ->
+            val merged = wt.branch != null && base != null && wt.branch != base && isMerged(wt.branch, base)
+            val noUpstream = wt.branch != null && !hasUpstream(wt.branch)
+            wt.copy(orphan = OrphanClassifier.classify(wt, merged = merged, noUpstream = noUpstream))
+        }
+    }
+
+    /**
+     * The repository's base branch — `main` or `master`, whichever exists as a local
+     * ref (preferring `main`). Used as the target for the "branch already merged" check.
+     * Returns null when neither is present, in which case the merged signal is skipped.
+     */
+    fun baseBranch(): String? {
+        for (candidate in listOf("main", "master")) {
+            val res = git(repoDir, listOf("rev-parse", "--verify", "--quiet", "refs/heads/$candidate"))
+            if (res.ok) return candidate
+        }
+        return null
+    }
+
+    /**
+     * True if [branch] is fully merged into [base]. Uses `git branch --merged <base>`,
+     * which lists exactly the local branches whose tip is reachable from [base] — i.e.
+     * whose work already lives on the base branch and can be safely dropped.
+     */
+    private fun isMerged(branch: String, base: String): Boolean {
+        val res = git(repoDir, listOf("branch", "--merged", base, "--format=%(refname:short)"))
+        if (!res.ok) return false
+        return res.stdout.lineSequence().map { it.trim() }.any { it == branch }
+    }
+
+    /**
+     * True if [branch] tracks a remote upstream. Probes `<branch>@{upstream}`: git
+     * exits non-zero when the branch has no configured upstream, which is precisely the
+     * "local-only, nothing pushed" signal we treat as a mild staleness hint.
+     */
+    private fun hasUpstream(branch: String): Boolean =
+        git(repoDir, listOf("rev-parse", "--abbrev-ref", "$branch@{upstream}")).ok
+
+    /**
      * Default location for a new worktree of [branch]: a sibling of the repo root
      * named `<repo>-<branch>`, with any slashes in the branch flattened to `-`
      * (so `feature/foo` → `myrepo-feature-foo`). This mirrors the common convention

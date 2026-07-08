@@ -12,6 +12,8 @@ package dev.alkom.gwm.git
  * @param isPrunable true when git itself flags the entry as prunable
  * @param isMain     true for the primary worktree (the first entry / the repo root)
  * @param dirty      working-tree cleanliness, filled in separately via status; null = not yet checked
+ * @param orphan     staleness hint (merged / no-upstream / prunable), filled in separately
+ *                   via [WorktreeService.withOrphanStatus]; [OrphanStatus.ACTIVE] by default
  */
 data class Worktree(
     val path: String,
@@ -23,6 +25,7 @@ data class Worktree(
     val isPrunable: Boolean = false,
     val isMain: Boolean = false,
     val dirty: Boolean? = null,
+    val orphan: OrphanStatus = OrphanStatus.ACTIVE,
 ) {
     /** Short branch label for display: branch name, "(detached)", or "(bare)". */
     val label: String

@@ -39,7 +39,9 @@ class InteractiveScreen(
             return
         }
         while (true) {
-            val worktrees = service.withDirtyFlags(service.list())
+            // Annotate with dirty flags AND orphaned/stale hints (Этап 5) so the row
+            // label can flag stale worktrees. Both are informational; nothing is deleted.
+            val worktrees = service.withOrphanStatus(service.withDirtyFlags(service.list()))
             if (worktrees.isEmpty()) {
                 terminal.println(brightYellow("Нет worktree для отображения."))
                 return
@@ -95,6 +97,10 @@ class InteractiveScreen(
                     if (wt.isPrunable) "prunable" else null,
                 ).ifEmpty { listOf("-") }.joinToString(", "),
         )
+        // Orphaned/stale hint (Этап 5): advisory only — we suggest, the user decides.
+        WorktreeTable.orphanHint(wt)?.let { hint ->
+            terminal.println("  ${bold("Orphaned:")} " + brightYellow("⚠ $hint"))
+        }
         terminal.println()
     }
 
@@ -163,7 +169,9 @@ class InteractiveScreen(
                 null -> "?"
             }
             val branch = if (wt.isMain) "${wt.label} (main)" else wt.label
-            return "$marker  $branch  —  ${wt.path}"
+            // Append a stale badge inline (Этап 5) — a hint to the human, not an action.
+            val orphan = if (wt.orphan.isOrphaned) "  ⚠ ${wt.orphan.reasons.joinToString("/")}" else ""
+            return "$marker  $branch$orphan  —  ${wt.path}"
         }
     }
 }
