@@ -20,6 +20,8 @@ dependencies {
     implementation("com.github.ajalt.clikt:clikt:5.0.3")
 
     testImplementation(kotlin("test"))
+    // JUnit Jupiter API for @TempDir / Assumptions used by the integration tests.
+    testImplementation("org.junit.jupiter:junit-jupiter-api:5.11.3")
 }
 
 application {
