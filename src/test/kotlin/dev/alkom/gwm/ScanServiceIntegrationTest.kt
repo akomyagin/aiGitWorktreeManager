@@ -46,9 +46,13 @@ class ScanServiceIntegrationTest {
         val repoA = initRepo(root, "alpha")
         val repoB = initRepo(root, "beta")
         // Give beta a second worktree so we exercise multi-worktree aggregation too.
-        // Place it OUTSIDE the scanned root so it doesn't get discovered as its own
-        // top-level repo (a linked worktree also carries a `.git`).
-        val extra = File(root.parentFile, "${root.name}-beta-feature")
+        // Placed INSIDE the scanned root, as a sibling of "beta" — exactly the layout
+        // `gwm add`'s default path produces. This must NOT be discovered as its own
+        // top-level repo (regression test for the double-counting bug found by
+        // independent /code-review: RepoScanner now only counts `.git`-DIRECTORY
+        // entries as repos, so a linked worktree's `.git`-FILE is correctly skipped
+        // here and it is only ever reached via beta's own `git worktree list`).
+        val extra = File(root, "beta-feature")
         WorktreeService(repoB).add(extra, newBranch = "feature", baseRef = "main")
 
         // Also drop a non-git folder under the root — discovery must ignore it.
@@ -56,7 +60,11 @@ class ScanServiceIntegrationTest {
 
         try {
             val repos = RepoScanner.findRepos(root)
-            assertEquals(listOf("alpha", "beta"), repos.map { it.name }, "only git repos, sorted")
+            assertEquals(
+                listOf("alpha", "beta"),
+                repos.map { it.name },
+                "the linked worktree beta-feature must not surface as its own repo",
+            )
 
             val result = ScanService().scan(repos)
             assertTrue(result.errors.isEmpty(), "no repo should error: ${result.errors}")
@@ -65,6 +73,9 @@ class ScanServiceIntegrationTest {
             assertEquals(setOf("alpha", "beta"), byRepo.keys)
             assertEquals(listOf("main"), byRepo["alpha"])
             assertEquals(setOf("main", "feature"), byRepo.getValue("beta").toSet())
+            // Exactly 3 worktrees total (alpha/main, beta/main, beta/feature) — not 5,
+            // which is what a double-count of beta-feature-as-its-own-repo would yield.
+            assertEquals(3, result.worktrees.size, "beta-feature must not be double-counted")
 
             // Dirty flags must be populated (not the "?"/null placeholder).
             assertTrue(result.worktrees.all { it.worktree.dirty != null }, "dirty flags should be filled")

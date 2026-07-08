@@ -11,10 +11,15 @@ import java.io.File
  * parent repo's own linked worktrees (and any vendored/embedded repos) as if they
  * were top-level projects. One level keeps the "what projects do I have" model honest.
  *
- * A directory counts as a repository when it contains a `.git` entry — either a
- * directory (the usual primary checkout) OR a plain file (a linked worktree stores
- * its `.git` as a file pointing at the shared gitdir). Accepting the file form means
- * a worktree placed next to its parent under the root is still recognised as a repo.
+ * A directory counts as a repository only when its `.git` entry is a DIRECTORY —
+ * a primary checkout. A linked worktree stores `.git` as a plain FILE pointing at
+ * the shared gitdir, and is deliberately NOT counted as its own top-level repo here:
+ * `git worktree list` on the primary checkout already returns every one of its
+ * worktrees (including ones living as siblings under this same root, which is the
+ * layout `gwm add`'s default path produces). Counting the file form too would make
+ * ScanService aggregate each such worktree twice — once under the primary's name,
+ * once again under the worktree's own directory name (found by independent
+ * /code-review on the first version of this scanner).
  *
  * Pure filesystem logic — no git subprocess — so it is fully unit-testable without git.
  */
@@ -47,6 +52,10 @@ object RepoScanner {
             .sortedBy { it.name }
     }
 
-    /** True when [dir] holds a `.git` entry (directory for a primary checkout, file for a worktree). */
-    private fun isGitRepo(dir: File): Boolean = File(dir, ".git").exists()
+    /**
+     * True when [dir] is a primary git checkout — its `.git` entry is a directory.
+     * A `.git` FILE marks a linked worktree, which is intentionally excluded (see
+     * class doc): it is already reachable via its primary checkout's worktree list.
+     */
+    private fun isGitRepo(dir: File): Boolean = File(dir, ".git").isDirectory
 }

@@ -40,9 +40,10 @@ object WorktreeTable {
      * Table widget for the multi-repo aggregated view (Этап 4).
      *
      * A separate renderer rather than an overloaded universal table: the aggregated
-     * view leads with a "Репозиторий" column and drops the single-repo `main`-is-bold
-     * cue (which repo's main? — meaningless once rows span repos). Two genuinely
-     * different shapes read cleaner as two small functions than as one branchy one.
+     * view leads with a bolded "Репозиторий" column, and keeps the same `main`-is-bold
+     * cue per row — it's still meaningful once qualified by the repo name in the same
+     * row. Two genuinely different shapes read cleaner as two small functions than as
+     * one branchy one.
      */
     fun renderAggregated(worktrees: List<AggregatedWorktree>): Widget = table {
         header { row("Репозиторий", "Ветка", "Статус", "Путь") }

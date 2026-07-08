@@ -19,11 +19,9 @@ class RepoScannerTest {
         File(parent, name).apply { assertTrue(mkdirs(), "mkdir $name failed") }
 
     @Test
-    fun `finds only immediate sub-directories with a git marker`(@TempDir root: File) {
+    fun `finds only immediate sub-directories that are primary checkouts`(@TempDir root: File) {
         // A primary checkout: `.git` is a directory.
         val repoA = dir(root, "repoA").also { File(it, ".git").mkdir() }
-        // A linked worktree living under the root: `.git` is a FILE pointing at the shared gitdir.
-        val repoB = dir(root, "repoB").also { File(it, ".git").writeText("gitdir: /somewhere/.git/worktrees/repoB\n") }
         // A plain, non-git project directory — must be ignored.
         dir(root, "plain-folder").also { File(it, "README.md").writeText("no git here\n") }
         // A loose file at the root — must be ignored.
@@ -31,9 +29,23 @@ class RepoScannerTest {
 
         val repos = RepoScanner.findRepos(root).map { it.name }
 
-        assertEquals(listOf("repoA", "repoB"), repos, "only git dirs, sorted by name")
-        // Sanity: the discovered dirs are exactly the ones we created.
-        assertTrue(repoA.exists() && repoB.exists())
+        assertEquals(listOf("repoA"), repos, "only primary-checkout dirs, sorted by name")
+        assertTrue(repoA.exists())
+    }
+
+    @Test
+    fun `excludes a linked worktree sitting next to its primary checkout`(@TempDir root: File) {
+        // A linked worktree living under the root: `.git` is a FILE pointing at the
+        // shared gitdir — exactly the layout `gwm add`'s default sibling path produces.
+        // It must NOT surface as its own top-level repo: `git worktree list` on the
+        // primary checkout already reports it, so counting the file form here would
+        // double the aggregation (the bug an earlier version of this scanner had).
+        val repoB = dir(root, "repoB").also { File(it, ".git").writeText("gitdir: /somewhere/.git/worktrees/repoB\n") }
+
+        val repos = RepoScanner.findRepos(root).map { it.name }
+
+        assertTrue(repos.isEmpty(), "a .git FILE marks a linked worktree, not a standalone repo; got $repos")
+        assertTrue(repoB.exists())
     }
 
     @Test
