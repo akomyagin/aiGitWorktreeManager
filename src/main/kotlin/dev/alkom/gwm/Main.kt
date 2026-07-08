@@ -16,6 +16,8 @@ import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.terminal.Terminal
 import dev.alkom.gwm.git.WorktreeService
 import dev.alkom.gwm.git.WorktreeService.RemoveStatus
+import dev.alkom.gwm.scan.RepoScanner
+import dev.alkom.gwm.scan.ScanService
 import dev.alkom.gwm.ui.InteractiveScreen
 import dev.alkom.gwm.ui.WorktreeTable
 import java.io.File
@@ -131,10 +133,40 @@ class RemoveCommand : CliktCommand(name = "remove") {
     }
 }
 
+class ScanCommand : CliktCommand(name = "scan") {
+    private val terminal = Terminal()
+    private val root: String? by option(
+        "--root",
+        help = "корень портфеля репозиториев (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
+    )
+
+    override fun help(context: com.github.ajalt.clikt.core.Context) =
+        "Агрегированный обзор worktree по всем репозиториям портфеля"
+
+    override fun run() {
+        val rootDir = RepoScanner.resolveRoot(root)
+        val repos = RepoScanner.findRepos(rootDir)
+        if (repos.isEmpty()) {
+            terminal.println(brightYellow("Git-репозитории не найдены в: ${rootDir.path}"))
+            return
+        }
+
+        terminal.println(bold("Портфель: ${rootDir.path} (${repos.size} репо)"))
+        val result = ScanService().scan(repos)
+        terminal.println(WorktreeTable.renderAggregated(result.worktrees))
+
+        // Broken repos are reported separately so a partial scan still shows the rest.
+        result.errors.forEach { err ->
+            terminal.println(brightYellow("⚠ ${err.repo}: ${err.reason.trim()}"))
+        }
+    }
+}
+
 fun main(args: Array<String>) =
     Gwm().subcommands(
         ListCommand(),
         InteractiveCommand(),
         CreateCommand(),
         RemoveCommand(),
+        ScanCommand(),
     ).main(args)

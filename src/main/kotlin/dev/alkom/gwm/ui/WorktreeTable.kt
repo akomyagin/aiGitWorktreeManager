@@ -7,6 +7,7 @@ import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.rendering.Widget
 import com.github.ajalt.mordant.table.table
 import dev.alkom.gwm.git.Worktree
+import dev.alkom.gwm.scan.AggregatedWorktree
 
 /**
  * Shared Mordant rendering for a repository's worktrees.
@@ -31,6 +32,25 @@ object WorktreeTable {
             worktrees.forEach { wt ->
                 val branchCell = if (wt.isMain) bold(wt.label) else wt.label
                 row(branchCell, statusCell(wt), gray(wt.path))
+            }
+        }
+    }
+
+    /**
+     * Table widget for the multi-repo aggregated view (Этап 4).
+     *
+     * A separate renderer rather than an overloaded universal table: the aggregated
+     * view leads with a "Репозиторий" column and drops the single-repo `main`-is-bold
+     * cue (which repo's main? — meaningless once rows span repos). Two genuinely
+     * different shapes read cleaner as two small functions than as one branchy one.
+     */
+    fun renderAggregated(worktrees: List<AggregatedWorktree>): Widget = table {
+        header { row("Репозиторий", "Ветка", "Статус", "Путь") }
+        body {
+            worktrees.forEach { agg ->
+                val wt = agg.worktree
+                val branchCell = if (wt.isMain) bold(wt.label) else wt.label
+                row(bold(agg.repo), branchCell, statusCell(wt), gray(wt.path))
             }
         }
     }
