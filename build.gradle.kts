@@ -18,6 +18,10 @@ dependencies {
     implementation("com.github.ajalt.mordant:mordant:3.0.1")
     // Command-line argument parsing (subcommands, options, help).
     implementation("com.github.ajalt.clikt:clikt:5.0.3")
+    // Coroutines: multi-repo aggregation (Этап 4) fans one git subprocess out per
+    // repository concurrently. Dozens of repos scanned sequentially would be
+    // noticeably slow — every worktree list/status is a separate process.
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 
     testImplementation(kotlin("test"))
     // JUnit Jupiter API for @TempDir / Assumptions used by the integration tests.
