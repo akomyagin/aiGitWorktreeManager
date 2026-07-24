@@ -1,10 +1,13 @@
 package dev.alkom.gwm.ui
 
+import com.github.ajalt.mordant.rendering.OverflowWrap
 import com.github.ajalt.mordant.rendering.TextColors.brightGreen
 import com.github.ajalt.mordant.rendering.TextColors.brightYellow
 import com.github.ajalt.mordant.rendering.TextColors.gray
 import com.github.ajalt.mordant.rendering.TextStyles.bold
+import com.github.ajalt.mordant.rendering.Whitespace
 import com.github.ajalt.mordant.rendering.Widget
+import com.github.ajalt.mordant.table.ColumnWidth
 import com.github.ajalt.mordant.table.table
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.scan.AggregatedWorktree
@@ -50,8 +53,24 @@ object WorktreeTable {
             null
         }
 
-    /** Full table widget for a list of worktrees. */
+    /**
+     * Full table widget for a list of worktrees.
+     *
+     * On a narrow/undetectable terminal, Mordant must shrink columns to fit. Путь is the only
+     * column the user actually needs to act on `cd`, so it gets [ColumnWidth.Expand] priority
+     * (soaks up remaining space instead of shrinking in lockstep with the cosmetic columns) and
+     * [OverflowWrap.ELLIPSES] so any truncation that does happen is visible, not silently dropped
+     * characters.
+     */
     fun render(worktrees: List<Worktree>): Widget = table {
+        overflowWrap = OverflowWrap.ELLIPSES
+        column(3) {
+            width = ColumnWidth.Expand()
+            // ELLIPSES only fires when whitespace.wrap is true; table cells default to
+            // NOWRAP, which silently hard-truncates instead.
+            whitespace = Whitespace.NORMAL
+            overflowWrap = OverflowWrap.ELLIPSES
+        }
         header { row("Ветка", "Статус", "Orphaned", "Путь") }
         body {
             worktrees.forEach { wt ->
@@ -71,6 +90,12 @@ object WorktreeTable {
      * one branchy one.
      */
     fun renderAggregated(worktrees: List<AggregatedWorktree>): Widget = table {
+        overflowWrap = OverflowWrap.ELLIPSES
+        column(4) {
+            width = ColumnWidth.Expand()
+            whitespace = Whitespace.NORMAL
+            overflowWrap = OverflowWrap.ELLIPSES
+        }
         header { row("Репозиторий", "Ветка", "Статус", "Orphaned", "Путь") }
         body {
             worktrees.forEach { agg ->

@@ -104,26 +104,38 @@ object PrintPath {
     }
 }
 
-/** Shared helper: resolve a [WorktreeService] for a repo path or bail with a message. */
-private fun openRepo(terminal: Terminal, repo: String): WorktreeService? {
+/**
+ * Non-interactive output (piped, redirected, a pty that can't report its size — e.g. `TERM=dumb`
+ * CI runners) falls back to Mordant's built-in ~79-column default, which is often narrower than
+ * where the output will actually be read (`less`, a log viewer, CI logs). Respect `$COLUMNS` when
+ * the environment sets it so piped/logged output isn't crushed tighter than necessary. Real
+ * interactive terminals are unaffected — [Terminal.width] stays auto-detected and live-resizable.
+ */
+private fun gwmTerminal(): Terminal =
+    Terminal(nonInteractiveWidth = System.getenv("COLUMNS")?.toIntOrNull() ?: 120)
+
+/**
+ * Shared helper: resolve a [WorktreeService] for a repo path, or raise a [CliktError] (stderr +
+ * non-zero exit) so callers — and any shell script wrapping `gwm` — can detect the failure.
+ */
+private fun openRepo(repo: String): WorktreeService {
     val repoDir = File(repo).absoluteFile
     val service = WorktreeService(repoDir)
     if (!service.isGitRepo()) {
-        terminal.println(brightYellow("Не git-репозиторий: ${repoDir.path}"))
-        return null
+        throw CliktError("Не git-репозиторий: ${repoDir.path}")
     }
     return service
 }
 
 class ListCommand : CliktCommand(name = "list") {
-    private val terminal = Terminal()
+    private val terminal = gwmTerminal()
     private val repo: String by argument(help = "путь к git-репозиторию").default(".")
 
     override fun help(context: com.github.ajalt.clikt.core.Context) =
         "Показать worktree репозитория (ветка, статус)"
 
     override fun run() {
-        val service = openRepo(terminal, repo) ?: return
+        val service = openRepo(repo)
         val worktrees = service.withOrphanStatus(service.withDirtyFlags(service.list()))
         terminal.println(bold("Worktrees: ${File(repo).absoluteFile.name}"))
         terminal.println(WorktreeTable.render(worktrees))
@@ -131,20 +143,20 @@ class ListCommand : CliktCommand(name = "list") {
 }
 
 class InteractiveCommand : CliktCommand(name = "interactive") {
-    private val terminal = Terminal()
+    private val terminal = gwmTerminal()
     private val repo: String by argument(help = "путь к git-репозиторию").default(".")
 
     override fun help(context: com.github.ajalt.clikt.core.Context) =
         "Интерактивный экран: выбор worktree и действий (детали / удалить)"
 
     override fun run() {
-        val service = openRepo(terminal, repo) ?: return
+        val service = openRepo(repo)
         InteractiveScreen(terminal, service).run()
     }
 }
 
 class CreateCommand : CliktCommand(name = "create") {
-    private val terminal = Terminal()
+    private val terminal = gwmTerminal()
     private val branch: String by argument(help = "имя новой ветки для worktree")
     private val path: String? by argument(help = "путь для worktree (по умолчанию рядом с репо)").optional()
     private val repo: String by option("--repo", help = "путь к git-репозиторию").default(".")
@@ -154,12 +166,11 @@ class CreateCommand : CliktCommand(name = "create") {
         "Создать новый worktree (git worktree add) с новой веткой"
 
     override fun run() {
-        val service = openRepo(terminal, repo) ?: return
+        val service = openRepo(repo)
         val target = path?.let { File(it).absoluteFile } ?: service.defaultWorktreePath(branch)
 
         if (target.exists()) {
-            terminal.println(brightYellow("Путь уже существует: ${target.path}"))
-            return
+            throw CliktError("Путь уже существует: ${target.path}")
         }
 
         terminal.println(gray("Создаю worktree: ветка '$branch' от '$base' в ${target.path}"))
@@ -168,13 +179,13 @@ class CreateCommand : CliktCommand(name = "create") {
             terminal.println(brightGreen("✓ Создан worktree: ${target.path}"))
             if (res.stdout.isNotBlank()) terminal.println(gray(res.stdout.trim()))
         } else {
-            terminal.println(brightYellow("Ошибка git: ${res.stderr.trim()}"))
+            throw CliktError("Ошибка git: ${res.stderr.trim()}")
         }
     }
 }
 
 class RemoveCommand : CliktCommand(name = "remove") {
-    private val terminal = Terminal()
+    private val terminal = gwmTerminal()
     private val target: String by argument(help = "путь или имя ветки worktree")
     private val repo: String by option("--repo", help = "путь к git-репозиторию").default(".")
     private val force: Boolean by option("--force", help = "удалить даже при незакоммиченных изменениях").flag()
@@ -183,26 +194,24 @@ class RemoveCommand : CliktCommand(name = "remove") {
         "Удалить worktree (git worktree remove) с проверкой на dirty-состояние"
 
     override fun run() {
-        val service = openRepo(terminal, repo) ?: return
+        val service = openRepo(repo)
         val outcome = service.safeRemove(target, force = force)
         when (outcome.status) {
             RemoveStatus.REMOVED -> terminal.println(brightGreen("✓ Удалён worktree: $target"))
             RemoveStatus.NOT_FOUND ->
-                terminal.println(brightYellow("Worktree не найден: $target"))
-            RemoveStatus.BLOCKED_DIRTY -> terminal.println(
-                brightYellow(
-                    "В worktree есть незакоммиченные изменения. " +
-                        "Повторите с --force, чтобы удалить и потерять их.",
-                ),
+                throw CliktError("Worktree не найден: $target")
+            RemoveStatus.BLOCKED_DIRTY -> throw CliktError(
+                "В worktree есть незакоммиченные изменения. " +
+                    "Повторите с --force, чтобы удалить и потерять их.",
             )
             RemoveStatus.GIT_ERROR ->
-                terminal.println(brightYellow("Ошибка git: ${outcome.result?.stderr?.trim().orEmpty()}"))
+                throw CliktError("Ошибка git: ${outcome.result?.stderr?.trim().orEmpty()}")
         }
     }
 }
 
 class ScanCommand : CliktCommand(name = "scan") {
-    private val terminal = Terminal()
+    private val terminal = gwmTerminal()
     private val root: String? by option(
         "--root",
         help = "корень портфеля репозиториев (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
