@@ -93,15 +93,17 @@ src/main/kotlin/dev/alkom/gwm/
 
 ## 7. Разбивка по Этапам (технически)
 
-- **Этап 0 (сделано):** Gradle-скелет, `application`-плагин, `GitCommand`/`Worktree`/`WorktreeParser`/`WorktreeService`, команда `gwm list <repo>` с Mordant-таблицей, юнит-тесты парсера. `./gradlew build` зелёный.
-- **Этап 1:** интерактивный список (Mordant `interactiveSelectList`), навигация стрелками, выбор worktree; вынести экраны в `ui/`.
-- **Этап 2:** `gwm add` / пункт меню «создать»: prompt на имя ветки, выбор базового ref (`git branch`/`git for-each-ref`), дефолтный путь (рядом с репо, `../<repo>-<branch>`), вызов `WorktreeService.add`. Интеграционные тесты на временном репо.
-- **Этап 3:** `gwm remove` / пункт «удалить»: подтверждение, обработка dirty (`--force` только по явному согласию), `prune`.
-- **Этап 4:** `scan/` — обход корня (`~/Projects/ai-projects/*`, конфигурируемо), поиск git-репо, параллельная (coroutines) агрегация worktree всех репо в одну таблицу.
-- **Этап 5:** orphaned-эвристики (`git branch --merged`, отсутствие upstream, `prunable`), визуальные пометки.
-- **Этап 6:** `--print-path` режим + `gwm cd <fuzzy>`, генерация shell-функции (`gwm shell-init`).
+Все Этапы MVP (0–6) реализованы, покрыты тестами и смержены в `master`. Ниже — что именно сделано на каждом, с точкой входа в код.
 
-Каждый Этап проходит workflow из `CLAUDE.md` (Opus план+код → Sonnet тесты → Opus ревью → до 3 итераций → PR в `master`).
+- **Этап 0 (сделано ✅):** Gradle-скелет, `application`-плагин, `GitCommand`/`Worktree`/`WorktreeParser`/`WorktreeService`, команда `gwm list <repo>` с Mordant-таблицей, юнит-тесты парсера. `./gradlew build` зелёный.
+- **Этап 1 (сделано ✅):** интерактивный список (Mordant `interactiveSelectList`), навигация стрелками, выбор worktree; экраны вынесены в `ui/InteractiveScreen.kt` + `ui/WorktreeTable.kt`. Команда `gwm interactive`. Форматирование строк (`rowLabel`/`entryKey`) — чистые функции, покрыты `InteractiveScreenTest`.
+- **Этап 2 (сделано ✅):** `gwm create <branch> [<path>]` с `--base <ref>` (дефолт `HEAD`) и `--repo`; дефолтный путь `../<repo>-<branch>` (`WorktreeService.defaultWorktreePath`), вызов `WorktreeService.add`. Интеграционные тесты на временном репо (`WorktreeServiceIntegrationTest`).
+- **Этап 3 (сделано ✅):** `gwm remove <path|branch>` + пункт «удалить» в `interactive`: подтверждение (`YesNoPrompt`), обработка dirty (`safeRemove` → `BLOCKED_DIRTY`, `--force` только по явному согласию), `WorktreeService.prune`.
+- **Этап 4 (сделано ✅):** `scan/` — обход корня (`~/Projects/ai-projects/*`, конфигурируемо через `--root`/`GWM_ROOT`), поиск git-репо (`RepoScanner`, только `.git`-директория = primary checkout), параллельная (coroutines, `Dispatchers.IO`) агрегация worktree всех репо в одну таблицу с изоляцией ошибок (`RepoError`). Команда `gwm scan`.
+- **Этап 5 (сделано ✅):** orphaned-эвристики (`git branch --merged`, отсутствие upstream, `prunable`) — чистый `OrphanClassifier` + факты из `WorktreeService.withOrphanStatus`; визуальные пометки в колонке «Orphaned» (`WorktreeTable`) и inline-бейдж в интерактивном списке.
+- **Этап 6 (сделано ✅):** корневая опция `--print-path <fuzzy>` (не подкоманда — Clikt резервирует токены с ведущим дефисом под опции, см. `Gwm` в `Main.kt`), резолвинг через `scan/WorktreeMatcher` (exact > substring, ambiguous = ошибка), `gwm cd <fuzzy>` через shell-функцию из `gwm shell-init` (`ui/ShellInit.kt`).
+
+Каждый Этап проходил workflow из `CLAUDE.md` (Opus план+код → Sonnet тесты → Opus ревью → до 3 итераций → PR в `master`).
 
 ---
 

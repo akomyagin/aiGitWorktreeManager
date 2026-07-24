@@ -35,24 +35,26 @@
 
 Терминология «Этап N» — по аналогии с соседними проектами портфеля. Этап 0 = bootstrap.
 
+> **Статус: MVP готов ✅.** Все Этапы 0–6 (Фаза 1 + Фаза 2) реализованы, покрыты тестами и смержены в `master` (PR #1–#4). Команды `gwm`: `list`, `interactive`, `create`, `remove`, `scan`, `shell-init` + корневая опция `--print-path`.
+
 ### Этап 0 — Bootstrap ✅
 Инициализация репозитория: документация (`PLAN`/`TECHNICAL_PLAN`/`POST_MVP_PLAN`), `CLAUDE.md`, skill, скелет Gradle-проекта, минимальный `Main.kt` с командой `list`, парсер `git worktree list --porcelain` + юнит-тесты. Сборка `./gradlew build` — зелёная.
 
 ### Фаза 1 — обзор и управление по одному репозиторию (ядро MVP)
 
-| Этап | Кратко |
-|---|---|
-| Этап 1 | Полный обзор одного репо: интерактивный TUI-список worktree (Mordant), ветка, статус чистое/грязное, выбор строки стрелками |
-| Этап 2 | Создание нового worktree из TUI (выбор базовой ветки/ref, имя новой ветки, путь по умолчанию рядом с репо) |
-| Этап 3 | Удаление existing worktree из TUI с подтверждением; корректная обработка `--force` для грязных; `git worktree prune` |
+| Этап | Статус | Кратко |
+|---|---|---|
+| Этап 1 | ✅ | Полный обзор одного репо: интерактивный TUI-список worktree (Mordant `interactiveSelectList`), ветка, статус чистое/грязное, выбор строки стрелками (`gwm interactive`, `ui/InteractiveScreen.kt`) |
+| Этап 2 | ✅ | Создание нового worktree (выбор базового ref через `--base`, имя новой ветки, путь по умолчанию рядом с репо) — `gwm create`, `WorktreeService.add` |
+| Этап 3 | ✅ | Удаление existing worktree с подтверждением; корректная обработка `--force` для грязных (`safeRemove` → `BLOCKED_DIRTY`); `git worktree prune` (`WorktreeService.prune`) — `gwm remove` + пункт меню в `interactive` |
 
 ### Фаза 2 — агрегация по нескольким репозиториям
 
-| Этап | Кратко |
-|---|---|
-| Этап 4 | Сканирование `~/Projects/ai-projects/*` (конфигурируемый корень) на git-репозитории; агрегированный обзор всех worktree всех репо в одной таблице |
-| Этап 5 | Обнаружение orphaned/stale worktree: ветка смержена/удалена/без upstream; визуальная пометка + подсказка «безопасно удалить» |
-| Этап 6 | Быстрое переключение: печать `cd`-команды выбранного worktree + опциональная shell-функция-обёртка (`gwm cd <fuzzy>`) для установки в `.bashrc` |
+| Этап | Статус | Кратко |
+|---|---|---|
+| Этап 4 | ✅ | Сканирование `~/Projects/ai-projects/*` (конфигурируемый корень через `--root`/`GWM_ROOT`) на git-репозитории; параллельная (coroutines) агрегация всех worktree всех репо в одной таблице (`gwm scan`, `scan/RepoScanner.kt`, `scan/ScanService.kt`) |
+| Этап 5 | ✅ | Обнаружение orphaned/stale worktree: ветка смержена/без upstream/prunable; визуальная пометка + подсказка «безопасно удалить» (`git/OrphanClassifier.kt`, `git/OrphanStatus.kt`, колонка «Orphaned» в таблицах) |
+| Этап 6 | ✅ | Быстрое переключение: `gwm --print-path <fuzzy>` (машиночитаемый путь) + shell-функция-обёртка `gwm cd <fuzzy>` через `gwm shell-init` для установки в `.bashrc`/`.zshrc` (`scan/WorktreeMatcher.kt`, `ui/ShellInit.kt`) |
 
 Детальный технический план, обоснование выбора TUI-технологии и разбор каждого Этапа — в [`TECHNICAL_PLAN.md`](./TECHNICAL_PLAN.md). Границы и идеи «на потом» — в [`POST_MVP_PLAN.md`](./POST_MVP_PLAN.md).
 
