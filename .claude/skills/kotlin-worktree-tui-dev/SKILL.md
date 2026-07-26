@@ -54,6 +54,29 @@ locked            # или: detached / bare / prunable <reason>
 
 `gwm` **никогда не удаляет worktree сам** — даже orphaned. Удаление — только по явному подтверждению пользователя в TUI. Dirty worktree удаляются с `--force` только после отдельного явного согласия. Orphaned-детекция — это **подсказка человеку**, не автоочистка.
 
+## Exit-коды: контракт для shell-скриптов
+
+Каждая CliktCommand должна сигнализировать неудачу через `throw CliktError("...")`, **не** через `terminal.println(...) + return`. Второе печатает предупреждение, но exit-код остаётся 0 — скрипт вокруг `gwm` (`&&`-цепочки, проверка `$?`) не увидит ошибки. Эталон — `PrintPath.emit` (Main.kt): все терминальные ветки (`Match.None`, `Match.Ambiguous`) бросают `CliktError`, только успех возвращает обычный `println` на stdout. Все команды (`list`/`create`/`remove`/`scan`) должны следовать тому же контракту для любой ветки-отказа (repo не git, target не найден, dirty без `--force`, ошибка git).
+
+## Mordant `table {}`: приоритет ширины колонок и многоточие при обрезке
+
+Не задокументировано нигде явно (нет sources jar в кеше Gradle для 3.0.1 — проверялось через декомпиляцию), но проверено эмпирически:
+
+- Колонки по умолчанию (`ColumnWidth.Auto`) при нехватке места режутся с потерей содержимого без индикатора — в т.ч. режется даже заголовок колонки. Чтобы отдать приоритет «важной» колонке (например, `Путь`, ради которой вообще смотрят в `scan`/`list`), задать ей `column(i) { width = ColumnWidth.Expand() }` — тогда остальные Auto-колонки остаются по содержимому, а Expand-колонка забирает остаток и обрезается первой.
+- `OverflowWrap.ELLIPSES` **не работает**, если не выставлен явно `whitespace = Whitespace.NORMAL` на той же колонке/таблице — ячейки таблицы по умолчанию `Whitespace.NOWRAP` (`wrap = false`), а условие показа «…» в Mordant — `whitespace.wrap && cellWidth > wrapWidth`. Без этого текст обрезается молча, без «…». Нужны оба свойства вместе:
+  ```kotlin
+  column(pathIndex) {
+      width = ColumnWidth.Expand()
+      whitespace = Whitespace.NORMAL
+      overflowWrap = OverflowWrap.ELLIPSES
+  }
+  ```
+- Fallback-ширина для недетектируемого/непривязанного к TTY вывода (pipe, `TERM=dumb`, CI-логи) по умолчанию у Mordant — ~79 колонок. Конструировать `Terminal(nonInteractiveWidth = System.getenv("COLUMNS")?.toIntOrNull() ?: 120)` — `nonInteractiveWidth` подменяет только этот fallback и не трогает автоопределение/живой ресайз реального интерактивного терминала.
+
+## Ловушка сборки: `./gradlew build` не пересобирает `installDist`
+
+`installDist` (задача `application`-плагина, кладёт бинарь в `build/install/gwm/bin/gwm`) **не** зависит от `build` по умолчанию — после `./gradlew build` бинарь в `build/install/` может быть устаревшим. Для ручной проверки поведения через собранный дистрибутив запускать `./gradlew installDist` явно (или `./gradlew build installDist` одной командой) перед прогоном `build/install/gwm/bin/gwm`.
+
 ## Тестирование
 
 - **Юнит (без git, без TTY):** `WorktreeParser` и orphaned-эвристики — детерминированные таблицы вход/выход. `./gradlew test`.
