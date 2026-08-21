@@ -168,4 +168,64 @@ class WorktreeTableRenderTest {
             assertFalse("Репозиторий" in renderList(worktrees, ROOT, w), "list must never show REPO at width $w")
         }
     }
+
+    // --- Этап 8, Фаза B: grouping (plan §Р1, cases 61-63) ---------------------------------
+
+    /** A repo with three worktrees, wide enough that REPO stays a column at 200. */
+    private fun grouped(): List<AggregatedWorktree> = listOf(
+        agg("knowledge_vault", "knowledge_vault/main", "main"),
+        agg("knowledge_vault", "knowledge_vault/docs", "docs"),
+        agg("knowledge_vault", "knowledge_vault/draft", "draft"),
+        agg("other-repo", "other-repo/main", "main"),
+    )
+
+    @Test // 61
+    fun `grouping - repo name only on the first row of a group`() {
+        val out = renderScan(grouped(), ROOT, 200)
+        // Inspect the REPO column itself (first bordered cell of each body row), not whole lines —
+        // the relative PATH cell also contains "knowledge_vault/…", which is expected and unrelated
+        // to grouping. A body row looks like: │ <REPO> │ <BRANCH> │ … │
+        val repoCells = out.lines()
+            .filter { it.startsWith("│") && "Репозиторий" !in it }
+            .map { it.trim('│').split("│").first().trim() }
+        val nonEmptyRepoCells = repoCells.filter { it.isNotEmpty() }
+        // Only the group start carries the name: exactly one "knowledge_vault" + one "other-repo".
+        assertEquals(
+            listOf("knowledge_vault", "other-repo"),
+            nonEmptyRepoCells,
+            "repo name must appear only on each group's first row; got REPO cells $repoCells\n$out",
+        )
+        // The three branches are all present (rows weren't dropped/merged).
+        assertTrue("main" in out && "docs" in out && "draft" in out, "all group rows present: $out")
+    }
+
+    @Test // 62
+    fun `grouping - row order is unchanged`() {
+        val out = renderScan(grouped(), ROOT, 200)
+        // Branches appear in exactly the input order: main, docs, draft, then other-repo's main.
+        val order = listOf("knowledge_vault/main", "knowledge_vault/docs", "knowledge_vault/draft", "other-repo/main")
+        var searchFrom = 0
+        for (seg in order) {
+            val idx = out.indexOf(seg, searchFrom)
+            assertTrue(idx >= 0, "segment '$seg' missing or out of order in:\n$out")
+            searchFrom = idx + seg.length
+        }
+    }
+
+    @Test // 63
+    fun `grouping - empty cells do not shrink the REPO column natural width`() {
+        // The projection's REPO natural width must still be measured on the non-empty first-row name.
+        val rows = WorktreeTable.rowsAggregated(grouped(), ROOT)
+        val natural = WorktreeTable.naturalWidths(rows, listOf(dev.alkom.gwm.ui.OverviewColumn.REPO))
+        val repoWidth = natural.getValue(dev.alkom.gwm.ui.OverviewColumn.REPO)
+        // "knowledge_vault" (15) is the widest name; the blanked cells (0) must not have won the max.
+        assertEquals("knowledge_vault".length, repoWidth, "natural REPO width must ignore blank grouped cells")
+
+        // And second/third rows of the group DO collapse to "" in the plain projection.
+        assertEquals("knowledge_vault", rows[0].repo)
+        assertTrue(rows[0].repoIsGroupStart, "first row is a group start")
+        assertFalse(rows[1].repoIsGroupStart, "second row of the group is NOT a start")
+        assertFalse(rows[2].repoIsGroupStart, "third row of the group is NOT a start")
+        assertTrue(rows[3].repoIsGroupStart, "new repo starts a new group")
+    }
 }
