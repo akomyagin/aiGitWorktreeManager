@@ -10,6 +10,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
@@ -83,5 +84,25 @@ class PrintPathIntegrationTest {
         val match = resolve(root, "main")
         assertTrue(match is WorktreeMatcher.Match.Ambiguous, "two `main`s must be ambiguous")
         assertEquals(2, match.candidates.size)
+    }
+
+    @Test // 47 — protects the `cd "$(...)"` contract: no shortened/decorated path may leak here.
+    fun `resolved path is absolute with no tilde, ellipsis or ANSI`(@TempDir root: File) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+        val repo = initRepo(root, "alpha")
+        val feature = File(root, "alpha-feature-login")
+        WorktreeService(repo).add(feature, newBranch = "feature/login", baseRef = "main")
+        try {
+            val match = resolve(root, "login")
+            assertTrue(match is WorktreeMatcher.Match.Found)
+            // This is exactly what PrintPath.emit prints to stdout.
+            val emitted = File(match.worktree.worktree.path).absolutePath
+            assertTrue(emitted.startsWith("/"), "must be absolute: $emitted")
+            assertFalse(emitted.contains("~"), "no tilde: $emitted")
+            assertFalse(emitted.contains("…"), "no ellipsis: $emitted")
+            assertFalse(emitted.contains(""), "no ANSI escape: $emitted")
+        } finally {
+            WorktreeService(repo).remove(feature.absolutePath, force = true)
+        }
     }
 }

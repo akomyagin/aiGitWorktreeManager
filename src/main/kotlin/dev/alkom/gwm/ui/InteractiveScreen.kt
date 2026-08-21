@@ -11,6 +11,7 @@ import com.github.ajalt.mordant.terminal.YesNoPrompt
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.git.WorktreeService
 import dev.alkom.gwm.git.WorktreeService.RemoveStatus
+import java.io.File
 
 /**
  * Interactive, keyboard-driven worktree screen (Mordant `interactiveSelectList`).
@@ -24,6 +25,7 @@ import dev.alkom.gwm.git.WorktreeService.RemoveStatus
 class InteractiveScreen(
     private val terminal: Terminal,
     private val service: WorktreeService,
+    private val pathBase: File? = null,
 ) {
 
     fun run() {
@@ -50,7 +52,7 @@ class InteractiveScreen(
             terminal.println(bold("Worktrees — стрелки для выбора, Enter — действие, q — выход"))
             val keys = worktrees.map { entryKey(it) }
             val selectedKey = terminal.interactiveSelectList {
-                worktrees.forEach { wt -> addEntry(entryKey(wt), rowLabel(wt)) }
+                worktrees.forEach { wt -> addEntry(entryKey(wt), rowLabel(wt, pathBase)) }
                 clearOnExit(false)
             }
 
@@ -63,7 +65,7 @@ class InteractiveScreen(
     /** Runs the action menu for [wt]. Returns false when the user wants to quit. */
     private fun handleAction(wt: Worktree): Boolean {
         terminal.println()
-        terminal.println(bold("Выбрано: ") + cyan(wt.label) + gray("  ${wt.path}"))
+        terminal.println(bold("Выбрано: ") + cyan(wt.label) + gray("  ${PathDisplay.shorten(wt.path, pathBase)}"))
 
         val action = terminal.interactiveSelectList {
             addEntry("details", "Показать детали")
@@ -83,6 +85,7 @@ class InteractiveScreen(
     private fun showDetails(wt: Worktree) {
         terminal.println()
         terminal.println(bold("Детали worktree"))
+        // Details keep the ABSOLUTE path on purpose: this is the screen the user copies from.
         terminal.println("  ${bold("Путь:")}    ${wt.path}")
         terminal.println("  ${bold("Ветка:")}   ${wt.label}")
         terminal.println("  ${bold("HEAD:")}    ${wt.head ?: "-"}")
@@ -160,9 +163,10 @@ class InteractiveScreen(
 
         /**
          * Human-readable one-line label for the select list: branch, status glyph,
-         * and path. Pure function so formatting is testable without a TTY.
+         * and a shortened path (relative to [base], else `~/...`, else absolute — Этап 7).
+         * Pure function so formatting is testable without a TTY.
          */
-        fun rowLabel(wt: Worktree): String {
+        fun rowLabel(wt: Worktree, base: File? = null): String {
             val marker = when (wt.dirty) {
                 true -> "●"
                 false -> "✓"
@@ -171,7 +175,7 @@ class InteractiveScreen(
             val branch = if (wt.isMain) "${wt.label} (main)" else wt.label
             // Append a stale badge inline (Этап 5) — a hint to the human, not an action.
             val orphan = if (wt.orphan.isOrphaned) "  ⚠ ${wt.orphan.reasons.joinToString("/")}" else ""
-            return "$marker  $branch$orphan  —  ${wt.path}"
+            return "$marker  $branch$orphan  —  ${PathDisplay.shorten(wt.path, base)}"
         }
     }
 }
