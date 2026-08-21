@@ -2,6 +2,7 @@ package dev.alkom.gwm
 
 import com.github.ajalt.mordant.rendering.AnsiLevel
 import com.github.ajalt.mordant.terminal.Terminal
+import dev.alkom.gwm.git.AheadBehind
 import dev.alkom.gwm.git.OrphanStatus
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.scan.AggregatedWorktree
@@ -23,6 +24,10 @@ class WorktreeTableRenderTest {
 
     private fun renderScan(worktrees: List<AggregatedWorktree>, root: File?, width: Int): String =
         term(width).render(WorktreeTable.renderAggregated(worktrees, root, width))
+
+    /** Deterministic-clock variant for the age column (Этап 8): fixed `now` so tests aren't flaky. */
+    private fun renderScanAt(worktrees: List<AggregatedWorktree>, root: File?, width: Int, now: Long): String =
+        term(width).render(WorktreeTable.renderAggregated(worktrees, root, width, now = now))
 
     private fun renderList(worktrees: List<Worktree>, base: File?, width: Int): String =
         term(width).render(WorktreeTable.render(worktrees, base, width))
@@ -227,5 +232,113 @@ class WorktreeTableRenderTest {
         assertFalse(rows[1].repoIsGroupStart, "second row of the group is NOT a start")
         assertFalse(rows[2].repoIsGroupStart, "third row of the group is NOT a start")
         assertTrue(rows[3].repoIsGroupStart, "new repo starts a new group")
+    }
+
+    // --- Этап 8, Фаза C: ahead/behind + age columns (plan §6, cases 64-68) ----------------
+
+    private val NOW = 1_700_000_000L
+    private val DAY = 86_400L
+
+    /** An aggregated worktree carrying ahead/behind + a commit epoch relative to [NOW]. */
+    private fun agg8(
+        repo: String,
+        repoRel: String,
+        branch: String,
+        aheadBehind: AheadBehind?,
+        daysOld: Long?,
+    ): AggregatedWorktree {
+        val base = wt(repoRel, branch)
+        return AggregatedWorktree(
+            repo,
+            base.copy(
+                aheadBehind = aheadBehind,
+                lastCommitEpoch = daysOld?.let { NOW - it * DAY },
+            ),
+        )
+    }
+
+    @Test // 64 — AGE column present when any row has a commit epoch, absent when all null
+    fun `AGE column appears only with commit epochs`() {
+        val withAge = listOf(agg8("r", "r/wt", "b", AheadBehind(1, 0), daysOld = 3))
+        assertTrue("Возраст" in renderScanAt(withAge, ROOT, 200, NOW), "AGE header expected")
+
+        // Plain fakePortfolio has no epochs → no AGE column (mirrors single-repo `list`).
+        assertFalse("Возраст" in renderScan(fakePortfolio(3), ROOT, 200), "no epochs → no AGE column")
+    }
+
+    @Test // 65 — AHEAD_BEHIND column present when any row has data, absent when all null
+    fun `AHEAD_BEHIND column appears only with data`() {
+        val withAb = listOf(agg8("r", "r/wt", "b", AheadBehind(2, 1), daysOld = 1))
+        assertTrue("↑↓" in renderScanAt(withAb, ROOT, 200, NOW), "ahead/behind header expected")
+        assertFalse("↑↓" in renderScan(fakePortfolio(3), ROOT, 200), "no ahead/behind → no column")
+    }
+
+    @Test // 66 — no upstream (null aheadBehind) renders the em-dash placeholder, not blank/crash
+    fun `no upstream renders em-dash in ahead-behind cell`() {
+        val rows = listOf(
+            agg8("r", "r/tracked", "tracked", AheadBehind(3, 0), daysOld = 2),
+            agg8("r", "r/local", "local", aheadBehind = null, daysOld = 5),
+        )
+        val out = renderScanAt(rows, ROOT, 200, NOW)
+        assertTrue("↑3 ↓0" in out, "tracked row shows numeric ahead/behind: $out")
+        assertTrue("—" in out, "no-upstream row shows em-dash placeholder: $out")
+    }
+
+    @Test // 67 — deterministic now: the age string is exactly what AgeFormat produces
+    fun `age renders deterministically for a fixed now`() {
+        val rows = listOf(agg8("r", "r/wt", "b", AheadBehind(0, 0), daysOld = 3))
+        val out = renderScanAt(rows, ROOT, 200, NOW)
+        assertTrue("3д" in out, "3-day-old commit must render '3д': $out")
+    }
+
+    @Test // 68 — at width 80 the nice-to-have columns are dropped before REPO; nothing overflows
+    fun `width 80 drops AGE and AHEAD_BEHIND before REPO`() {
+        // Wide names create width pressure but REPO must still outrank AGE/AHEAD_BEHIND at 80.
+        val rows = (0 until 5).map { i ->
+            agg8(
+                repo = "ai-knowledge-vault-project-$i",
+                repoRel = "ai-knowledge-vault-project-$i/docs-session-handoff-2026-08-2$i",
+                branch = "feature/documentation-$i",
+                aheadBehind = AheadBehind(i, i % 2),
+                daysOld = (i + 1).toLong(),
+            )
+        }
+        val out = renderScanAt(rows, ROOT, 80, NOW)
+        assertFalse("Возраст" in out, "AGE must be dropped at 80: $out")
+        assertFalse("↑↓" in out, "AHEAD_BEHIND must be dropped at 80: $out")
+        // No line exceeds 80 display columns (kotlin String.length ~ display width for our glyphs).
+        out.lines().forEach { assertTrue(it.length <= 80, "line ${it.length} > 80: >$it<") }
+    }
+
+    @Test // regression: a width where AGE/AHEAD_BEHIND are PRESENT must still fit — no test previously
+    // rendered the actual ↑/↓/— glyphs together with a line-length assertion (found on review).
+    fun `width fits when AGE and AHEAD_BEHIND columns are actually rendered`() {
+        val rows = (0 until 8).map { i ->
+            agg8(
+                repo = "repo-$i",
+                repoRel = "repo-$i/wt-branch-number-$i",
+                branch = "feature/branch-number-$i",
+                aheadBehind = if (i % 3 == 0) null else AheadBehind(ahead = i, behind = i % 2),
+                daysOld = (i * 7).toLong(),
+            )
+        }
+        val width = 200
+        val out = renderScanAt(rows, ROOT, width, NOW)
+        assertTrue("Возраст" in out, "sanity: AGE column must actually be present: $out")
+        assertTrue("↑↓" in out, "sanity: AHEAD_BEHIND column must actually be present: $out")
+        assertTrue("—" in out, "sanity: at least one em-dash placeholder (i%3==0 rows) expected: $out")
+        out.lines().forEach { assertTrue(it.length <= width, "line ${it.length} > $width: >$it<") }
+    }
+
+    @Test // single-repo `list` (fields unfilled in production) shows neither Этап-8 column
+    fun `single-repo list without ahead-behind or age shows neither column`() {
+        // Production `list` never fills aheadBehind/lastCommitEpoch, so both columns are absent —
+        // exactly the Этап-7 output. Uses the plain wt() helper (fields default to null).
+        val worktrees = listOf(wt("wt-a", "a"), wt("wt-b", "b"))
+        for (w in listOf(200, 120, 80)) {
+            val out = renderList(worktrees, ROOT, w)
+            assertFalse("Возраст" in out, "list must not show AGE at width $w: $out")
+            assertFalse("↑↓" in out, "list must not show AHEAD_BEHIND at width $w: $out")
+        }
     }
 }

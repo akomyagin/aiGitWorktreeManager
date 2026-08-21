@@ -72,8 +72,15 @@ class ScanService(private val git: GitRunner = RealGitRunner) {
         val name = repo.name
         return runCatching {
             val service = WorktreeService(repo, git)
-            // Layer both annotations: dirty flags (cheap-ish) and orphaned hints (Этап 5).
-            val flagged = service.withOrphanStatus(service.withDirtyFlags(service.list()))
+            // Layer the annotations in order: dirty flags (cheap-ish), orphaned hints (Этап 5), and
+            // ahead/behind + last-commit age (Этап 8). Each is one-or-two extra git calls per
+            // worktree; the per-repo parallelism in scanAsync (one coroutine per repo on
+            // Dispatchers.IO) is what keeps the aggregate scan fast. If a portfolio ever has repos
+            // with many worktrees each and a measured regression appears, the next lever is
+            // parallelising worktrees WITHIN a repo — measured, not pre-optimised (plan §Р4/§C7).
+            val flagged = service.withAheadBehindAndAge(
+                service.withOrphanStatus(service.withDirtyFlags(service.list())),
+            )
             flagged.map { AggregatedWorktree(name, it) }
         }.fold(
             onSuccess = { it to null },

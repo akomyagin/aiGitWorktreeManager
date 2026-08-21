@@ -14,6 +14,12 @@ package dev.alkom.gwm.git
  * @param dirty      working-tree cleanliness, filled in separately via status; null = not yet checked
  * @param orphan     staleness hint (merged / no-upstream / prunable), filled in separately
  *                   via [WorktreeService.withOrphanStatus]; [OrphanStatus.ACTIVE] by default
+ * @param aheadBehind commits ahead/behind the branch's upstream, filled in separately via
+ *                    [WorktreeService.withAheadBehindAndAge]; null = not computed OR no upstream
+ *                    (both render as `—`, see [AheadBehind])
+ * @param lastCommitEpoch unix timestamp (seconds) of the worktree's last commit (`git log -1
+ *                    --format=%ct`), filled in via [WorktreeService.withAheadBehindAndAge];
+ *                    null = not computed / no commits (bare, unborn branch)
  */
 data class Worktree(
     val path: String,
@@ -26,6 +32,8 @@ data class Worktree(
     val isMain: Boolean = false,
     val dirty: Boolean? = null,
     val orphan: OrphanStatus = OrphanStatus.ACTIVE,
+    val aheadBehind: AheadBehind? = null,
+    val lastCommitEpoch: Long? = null,
 ) {
     /** Short branch label for display: branch name, "(detached)", or "(bare)". */
     val label: String

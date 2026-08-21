@@ -1,7 +1,12 @@
 package dev.alkom.gwm.ui
 
-/** Logical columns of the overview table, in a fixed vocabulary the layout planner reasons over. */
-enum class OverviewColumn { REPO, BRANCH, STATUS, ORPHAN, PATH }
+/**
+ * Logical columns of the overview table, in a fixed vocabulary the layout planner reasons over.
+ *
+ * AGE and AHEAD_BEHIND (Этап 8) are "nice to have" columns: on a narrow terminal they are the FIRST
+ * to be dropped — earlier than REPO/ORPHAN/BRANCH/PATH (see the degradation ladder in [plan]).
+ */
+enum class OverviewColumn { REPO, BRANCH, STATUS, ORPHAN, AGE, AHEAD_BEHIND, PATH }
 
 /**
  * The chosen columns (in render order) with an assigned CONTENT width each. An empty list means
@@ -39,11 +44,18 @@ object TableLayout {
      * @param natural natural width per column = max(header width, max cell width)
      */
     fun plan(width: Int, wanted: List<OverviewColumn>, natural: Map<OverviewColumn, Int>): LayoutPlan {
-        // Degradation ladder: full → drop REPO → drop REPO+ORPHAN → compact.
+        // Degradation ladder (Этап 8, plan §Р5). The two "nice to have" columns go FIRST — before
+        // any structural column — so on a narrow terminal we sacrifice ahead/behind and age before
+        // REPO/ORPHAN/PATH. Order of removal:
+        //   full → −AHEAD_BEHIND → −AGE → −REPO → −REPO−ORPHAN → compact.
+        // `distinct()` collapses rungs that don't actually differ (e.g. AGE/AHEAD_BEHIND absent in
+        // the single-repo `list` view), so this stays correct for any subset of `wanted`.
         val ladder = listOf(
             wanted,
-            wanted - OverviewColumn.REPO,
-            wanted - OverviewColumn.REPO - OverviewColumn.ORPHAN,
+            wanted - OverviewColumn.AHEAD_BEHIND,
+            wanted - OverviewColumn.AHEAD_BEHIND - OverviewColumn.AGE,
+            wanted - OverviewColumn.AHEAD_BEHIND - OverviewColumn.AGE - OverviewColumn.REPO,
+            wanted - OverviewColumn.AHEAD_BEHIND - OverviewColumn.AGE - OverviewColumn.REPO - OverviewColumn.ORPHAN,
         ).distinct()
 
         // Two sweeps of the ladder. First sweep: a rung only "fits" if PATH reaches its PREFERRED
@@ -63,9 +75,10 @@ object TableLayout {
      * PATH cannot reach its floor (caller drops to the next ladder rung).
      *
      * PATH is the elastic column: it takes what's left, capped at [PREFERRED_PATH] and its natural
-     * width. When space is short we borrow from BRANCH (down to [MIN_BRANCH]); REPO, STATUS and
-     * ORPHAN never shrink (too narrow already — REPO gets dropped whole instead, see below). If
-     * PATH still can't reach `min(natural, MIN_PATH)`, this rung fails.
+     * width. When space is short we borrow from BRANCH (down to [MIN_BRANCH]); REPO, STATUS, ORPHAN,
+     * AGE and AHEAD_BEHIND never shrink per-character (too narrow already — a column gets dropped
+     * WHOLE by the ladder instead, AGE/AHEAD_BEHIND first, then REPO). If PATH still can't reach
+     * `min(natural, MIN_PATH)`, this rung fails and the caller falls to the next ladder rung.
      */
     private fun assign(
         width: Int,

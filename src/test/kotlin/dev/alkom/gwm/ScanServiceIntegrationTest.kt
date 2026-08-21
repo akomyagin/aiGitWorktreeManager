@@ -11,6 +11,7 @@ import org.junit.jupiter.api.io.TempDir
 import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -115,6 +116,52 @@ class ScanServiceIntegrationTest {
         assertTrue(result.errors.single().reason.contains("simulated broken repo"))
 
         assertTrue(healthy.exists())
+    }
+
+    @Test // 51/53 — real upstream: ahead/behind and last-commit age are populated correctly
+    fun `worktree with upstream reports correct ahead-behind and age`(@TempDir root: File) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+
+        // A bare "remote" plus a tracking clone under the scanned root. The clone's `main` tracks
+        // origin/main; we then add 2 local commits so it is ahead 2, behind 0.
+        val bare = File(root, "up.git").apply { assertTrue(mkdirs()) }
+        assertTrue(git(bare, "init", "--bare", "-b", "main").ok, "bare init failed")
+
+        val clone = File(root, "clone")
+        assertTrue(GitCommand.run(root, "clone", bare.absolutePath, clone.name).ok, "clone failed")
+        git(clone, "config", "user.email", "test@example.com")
+        git(clone, "config", "user.name", "Test")
+        File(clone, "f").writeText("a\n"); git(clone, "add", "f"); git(clone, "commit", "-m", "c1")
+        assertTrue(git(clone, "push", "-u", "origin", "main").ok, "initial push failed")
+        // Two local commits ahead of the upstream.
+        File(clone, "f").writeText("b\n"); git(clone, "commit", "-am", "c2")
+        File(clone, "f").writeText("c\n"); git(clone, "commit", "-am", "c3")
+
+        // Only the clone is a real repo we care about; the bare dir has no worktrees to speak of.
+        val repos = RepoScanner.findRepos(root).filter { it.name == "clone" }
+        val result = ScanService().scan(repos)
+        assertTrue(result.errors.isEmpty(), "no repo should error: ${result.errors}")
+
+        val wt = result.worktrees.single { it.repo == "clone" }.worktree
+        assertEquals(2, wt.aheadBehind?.ahead, "ahead should be 2 (two local commits)")
+        assertEquals(0, wt.aheadBehind?.behind, "behind should be 0")
+        assertTrue(wt.lastCommitEpoch != null && wt.lastCommitEpoch!! > 0, "age epoch must be filled")
+    }
+
+    @Test // 52 — no upstream: aheadBehind null, and it does NOT surface as a scan error
+    fun `worktree without upstream reports null ahead-behind and no error`(@TempDir root: File) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+
+        // A plain local repo (initRepo commits on `main` but sets no upstream).
+        initRepo(root, "solo")
+
+        val repos = RepoScanner.findRepos(root)
+        val result = ScanService().scan(repos)
+
+        assertTrue(result.errors.isEmpty(), "no-upstream must not become a RepoError: ${result.errors}")
+        val wt = result.worktrees.single { it.repo == "solo" }.worktree
+        assertNull(wt.aheadBehind, "a branch with no upstream must have null ahead/behind")
+        assertTrue(wt.lastCommitEpoch != null, "age epoch still filled even without upstream")
     }
 
     @Test
