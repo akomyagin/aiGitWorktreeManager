@@ -56,6 +56,12 @@
 | Этап 5 | ✅ | Обнаружение orphaned/stale worktree: ветка смержена/без upstream/prunable; визуальная пометка + подсказка «безопасно удалить» (`git/OrphanClassifier.kt`, `git/OrphanStatus.kt`, колонка «Orphaned» в таблицах) |
 | Этап 6 | ✅ | Быстрое переключение: `gwm --print-path <fuzzy>` (машиночитаемый путь) + shell-функция-обёртка `gwm cd <fuzzy>` через `gwm shell-init` для установки в `.bashrc`/`.zshrc` (`scan/WorktreeMatcher.kt`, `ui/ShellInit.kt`) |
 
+### Пост-MVP улучшения
+
+| Этап | Статус | Кратко |
+|------|--------|--------|
+| Этап 7 — читаемый обзор | ✅ | Таблица `scan`/`list` подстраивается под ширину терминала (собственное бюджетирование колонок вместо Mordant `Expand()`, деградация до компактного списка без рамок), пути показываются относительно корня портфеля с обрезкой хвоста, компактная таблица (27 worktree → 31 строка), конфликт нескольких `--root` → явная ошибка, `~`-раскрытие корня. Точки входа: `ui/PathDisplay.kt`, `ui/TableLayout.kt`, `scan/RootSelection.kt` (+ переработка `ui/WorktreeTable.kt`, `scan/RepoScanner.expandTilde`) |
+
 Детальный технический план, обоснование выбора TUI-технологии и разбор каждого Этапа — в [`TECHNICAL_PLAN.md`](./TECHNICAL_PLAN.md). Границы и идеи «на потом» — в [`POST_MVP_PLAN.md`](./POST_MVP_PLAN.md).
 
 ## 7. Определение готовности MVP

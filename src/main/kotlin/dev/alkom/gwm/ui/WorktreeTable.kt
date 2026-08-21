@@ -7,45 +7,35 @@ import com.github.ajalt.mordant.rendering.TextColors.gray
 import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.rendering.Whitespace
 import com.github.ajalt.mordant.rendering.Widget
-import com.github.ajalt.mordant.table.ColumnWidth
+import com.github.ajalt.mordant.table.Borders
 import com.github.ajalt.mordant.table.table
+import com.github.ajalt.mordant.widgets.Text
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.scan.AggregatedWorktree
+import java.io.File
 
 /**
- * Shared Mordant rendering for a repository's worktrees.
+ * Shared Mordant rendering for the worktree overview (Этап 7 rewrite).
  *
- * Kept UI-only: takes already-computed [Worktree]s (dirty flags optional) and
- * produces widgets. No git, no I/O — so the domain layer stays independent of the
- * terminal (see docs/TECHNICAL_PLAN.md §3).
+ * Design (plan §2):
+ *  - **Р1** paths are shown relative to a base (portfolio root for `scan`, repo's parent for
+ *    `list`), truncated preserving the TAIL — the distinguishing segment is at the end.
+ *  - **Р2** we budget column widths ourselves ([TableLayout]) and pre-truncate cells, then hand
+ *    Mordant `Auto` columns it can't shrink further. `Expand()` is gone: it collapses to zero when
+ *    there is no remainder (the 80-column bug).
+ *  - **Р3** compact table: only the header and outer frame keep horizontal rules
+ *    (`body { cellBorders = Borders.LEFT_RIGHT }`), so 27 worktrees render in ~31 lines, not 58.
+ *  - **Р5** on a terminal too narrow for even the minimal set, fall back to a frameless list.
+ *
+ * Kept UI-only: takes already-computed [Worktree]s and produces widgets. Widths are measured on
+ * PLAIN strings before any color is applied (color would corrupt `String.length`).
  */
 object WorktreeTable {
 
-    /** Colored status cell for a worktree's dirty flag. */
-    fun statusCell(wt: Worktree): String = when (wt.dirty) {
-        true -> brightYellow("● dirty")
-        false -> brightGreen("✓ clean")
-        null -> gray("?")
-    }
+    /** Colored status cell for a worktree's dirty flag. Kept unchanged (plan §4). */
+    fun statusCell(wt: Worktree): String = colorStatus(wt.dirty, statusPlain(wt.dirty))
 
-    /**
-     * Colored orphaned/stale badge for a worktree (Этап 5), or a blank cell when the
-     * worktree looks active. Uses [brightYellow] — the same "attention, not error" hue
-     * as the dirty marker — and lists the concrete signals so the human can judge
-     * ("merged" reads very differently from "prunable"). This is a hint only: `gwm`
-     * never deletes anything on its own.
-     */
-    fun orphanCell(wt: Worktree): String =
-        if (wt.orphan.isOrphaned) {
-            brightYellow("⚠ ${wt.orphan.reasons.joinToString("/")}")
-        } else {
-            gray("")
-        }
-
-    /**
-     * One-line, safe-to-delete hint for orphaned worktrees, or null when active.
-     * Purely advisory text — the user still has to trigger removal explicitly.
-     */
+    /** One-line, safe-to-delete hint for orphaned worktrees, or null when active. Unchanged. */
     fun orphanHint(wt: Worktree): String? =
         if (wt.orphan.isOrphaned) {
             "безопасно удалить (${wt.orphan.reasons.joinToString(", ")})"
@@ -53,56 +43,225 @@ object WorktreeTable {
             null
         }
 
-    /**
-     * Full table widget for a list of worktrees.
-     *
-     * On a narrow/undetectable terminal, Mordant must shrink columns to fit. Путь is the only
-     * column the user actually needs to act on `cd`, so it gets [ColumnWidth.Expand] priority
-     * (soaks up remaining space instead of shrinking in lockstep with the cosmetic columns) and
-     * [OverflowWrap.ELLIPSES] so any truncation that does happen is visible, not silently dropped
-     * characters.
-     */
-    fun render(worktrees: List<Worktree>): Widget = table {
-        overflowWrap = OverflowWrap.ELLIPSES
-        column(3) {
-            width = ColumnWidth.Expand()
-            // ELLIPSES only fires when whitespace.wrap is true; table cells default to
-            // NOWRAP, which silently hard-truncates instead.
-            whitespace = Whitespace.NORMAL
-            overflowWrap = OverflowWrap.ELLIPSES
+    /** Single-repo overview. Base = repo's parent dir; no REPO column at any width. */
+    fun render(worktrees: List<Worktree>, base: File?, width: Int): Widget =
+        renderRows(rows(worktrees, base), width)
+
+    /** Multi-repo aggregated overview. Base = portfolio root; REPO column droppable by width. */
+    fun renderAggregated(worktrees: List<AggregatedWorktree>, root: File?, width: Int): Widget =
+        renderRows(rowsAggregated(worktrees, root), width)
+
+    // --- plain-row projection -------------------------------------------------------------
+
+    internal fun rows(worktrees: List<Worktree>, base: File?): List<OverviewRow> =
+        worktrees.map { wt -> row(repo = null, wt = wt, base = base) }
+
+    internal fun rowsAggregated(worktrees: List<AggregatedWorktree>, root: File?): List<OverviewRow> =
+        worktrees.map { agg -> row(repo = agg.repo, wt = agg.worktree, base = root) }
+
+    private fun row(repo: String?, wt: Worktree, base: File?): OverviewRow {
+        val shortened = PathDisplay.shorten(wt.path, base)
+        // Relative iff it did not fall back to "~/..." or an absolute path.
+        val relative = !shortened.startsWith("~") && !shortened.startsWith("/")
+        return OverviewRow(
+            repo = repo,
+            branch = wt.label,
+            isMain = wt.isMain,
+            dirty = wt.dirty,
+            orphanReasons = if (wt.orphan.isOrphaned) wt.orphan.reasons else emptyList(),
+            path = shortened,
+            pathIsRelative = relative,
+        )
+    }
+
+    // --- layout + render ------------------------------------------------------------------
+
+    private const val H_REPO = "Репозиторий"
+    private const val H_BRANCH = "Ветка"
+    private const val H_STATUS = "Статус"
+    private const val H_ORPHAN = "Orphaned"
+    private const val H_PATH = "Путь"
+
+    private fun header(col: OverviewColumn): String = when (col) {
+        OverviewColumn.REPO -> H_REPO
+        OverviewColumn.BRANCH -> H_BRANCH
+        OverviewColumn.STATUS -> H_STATUS
+        OverviewColumn.ORPHAN -> H_ORPHAN
+        OverviewColumn.PATH -> H_PATH
+    }
+
+    /** Natural width per column = max(header, max plain cell) over the given [cols]. */
+    internal fun naturalWidths(rows: List<OverviewRow>, cols: List<OverviewColumn>): Map<OverviewColumn, Int> =
+        cols.associateWith { col ->
+            val cells = rows.map { plainCell(it, col, cols) }
+            (cells + header(col)).maxOf { it.length }
         }
-        header { row("Ветка", "Статус", "Orphaned", "Путь") }
-        body {
-            worktrees.forEach { wt ->
-                val branchCell = if (wt.isMain) bold(wt.label) else wt.label
-                row(branchCell, statusCell(wt), orphanCell(wt), gray(wt.path))
+
+    /**
+     * Plain (uncolored) content of a cell, used both for width measurement and, after truncation,
+     * as the string that gets styled. [cols] is the ACTIVE column set so we know whether ORPHAN was
+     * dropped (→ append `⚠` to the branch) and whether REPO was dropped (→ prefix `<repo>: ` to a
+     * non-relative path so repo membership isn't lost).
+     */
+    private fun plainCell(r: OverviewRow, col: OverviewColumn, cols: List<OverviewColumn>): String = when (col) {
+        OverviewColumn.REPO -> r.repo ?: ""
+        OverviewColumn.BRANCH -> {
+            val orphanDropped = OverviewColumn.ORPHAN !in cols
+            if (orphanDropped && r.orphanReasons.isNotEmpty()) "${r.branch} ⚠" else r.branch
+        }
+        OverviewColumn.STATUS -> statusPlain(r.dirty)
+        OverviewColumn.ORPHAN -> if (r.orphanReasons.isNotEmpty()) "⚠ ${r.orphanReasons.joinToString("/")}" else ""
+        OverviewColumn.PATH -> {
+            val repoDropped = OverviewColumn.REPO !in cols
+            if (repoDropped && !r.pathIsRelative && r.repo != null) "${r.repo}: ${r.path}" else r.path
+        }
+    }
+
+    private fun statusPlain(dirty: Boolean?): String = when (dirty) {
+        true -> "● dirty"
+        false -> "✓ clean"
+        null -> "?"
+    }
+
+    /**
+     * Core renderer. Chooses columns (ORPHAN only if any row is orphaned), plans widths, and either
+     * renders the compact list (Р5) or a bordered table with pre-truncated, then styled, cells.
+     */
+    internal fun renderRows(rows: List<OverviewRow>, width: Int): Widget {
+        if (rows.isEmpty()) return Text("")
+
+        val hasRepo = rows.any { it.repo != null }
+        val anyOrphan = rows.any { it.orphanReasons.isNotEmpty() }
+        val wanted = buildList {
+            if (hasRepo) add(OverviewColumn.REPO)
+            add(OverviewColumn.BRANCH)
+            add(OverviewColumn.STATUS)
+            if (anyOrphan) add(OverviewColumn.ORPHAN)
+            add(OverviewColumn.PATH)
+        }
+
+        val plan = TableLayout.plan(width, wanted, naturalWidths(rows, wanted))
+        if (plan.compact) return renderCompact(rows, width)
+
+        val cols = plan.columns.map { it.first }
+        val widthOf = plan.columns.toMap()
+
+        return table {
+            // Р3: keep the OUTER frame (tableBorders) but drop inter-row horizontal rules in the
+            // body (cellBorders = LEFT_RIGHT). Empirically in Mordant 3.0.1, body cellBorders alone
+            // ALSO strips the table's bottom edge, so tableBorders = ALL restores it. Recorded in
+            // SKILL.md. Result: 27 worktrees render in ~31 lines, not 58.
+            tableBorders = Borders.ALL
+            body {
+                cellBorders = Borders.LEFT_RIGHT
+            }
+            column(cols.indexOf(OverviewColumn.PATH)) {
+                // Safety net if our budgeting is off by a char: a VISIBLE ellipsis, not silent drop.
+                // Width stays ColumnWidth.Auto (the default) — we've already pre-truncated cells,
+                // so Mordant has nothing left to shrink (Р2). Expand() is deliberately gone.
+                whitespace = Whitespace.NORMAL
+                overflowWrap = OverflowWrap.ELLIPSES
+            }
+            header {
+                row(*cols.map { bold(header(it)) }.toTypedArray())
+            }
+            body {
+                rows.forEach { r ->
+                    val cells = cols.map { col -> styledCell(r, col, cols, widthOf.getValue(col)) }
+                    row(*cells.toTypedArray())
+                }
             }
         }
     }
 
-    /**
-     * Table widget for the multi-repo aggregated view (Этап 4).
-     *
-     * A separate renderer rather than an overloaded universal table: the aggregated
-     * view leads with a bolded "Репозиторий" column, and keeps the same `main`-is-bold
-     * cue per row — it's still meaningful once qualified by the repo name in the same
-     * row. Two genuinely different shapes read cleaner as two small functions than as
-     * one branchy one.
-     */
-    fun renderAggregated(worktrees: List<AggregatedWorktree>): Widget = table {
-        overflowWrap = OverflowWrap.ELLIPSES
-        column(4) {
-            width = ColumnWidth.Expand()
-            whitespace = Whitespace.NORMAL
-            overflowWrap = OverflowWrap.ELLIPSES
-        }
-        header { row("Репозиторий", "Ветка", "Статус", "Orphaned", "Путь") }
-        body {
-            worktrees.forEach { agg ->
-                val wt = agg.worktree
-                val branchCell = if (wt.isMain) bold(wt.label) else wt.label
-                row(bold(agg.repo), branchCell, statusCell(wt), orphanCell(wt), gray(wt.path))
+    /** Pre-truncate to the assigned width, THEN color. Never measure a colored string. */
+    private fun styledCell(r: OverviewRow, col: OverviewColumn, cols: List<OverviewColumn>, w: Int): String {
+        val plain = plainCell(r, col, cols)
+        return when (col) {
+            OverviewColumn.REPO -> {
+                val t = PathDisplay.truncateHead(plain, w)
+                bold(t)
+            }
+            OverviewColumn.BRANCH -> {
+                // When ORPHAN was dropped, plain ends in " ⚠". Head-truncating the whole cell would
+                // cut the glyph off the tail, so truncate only the branch NAME and re-append " ⚠".
+                val orphanSuffix = OverviewColumn.ORPHAN !in cols && r.orphanReasons.isNotEmpty()
+                val t = if (orphanSuffix) {
+                    PathDisplay.truncateHead(r.branch, (w - 2).coerceAtLeast(1)) + " ⚠"
+                } else {
+                    PathDisplay.truncateHead(plain, w)
+                }
+                if (r.isMain) bold(t) else t
+            }
+            OverviewColumn.STATUS -> colorStatus(r.dirty, plain)
+            OverviewColumn.ORPHAN -> if (plain.isEmpty()) gray("") else brightYellow(PathDisplay.truncateHead(plain, w))
+            OverviewColumn.PATH -> {
+                // When REPO was dropped, `plain` starts with "<repo>: " (plainCell above). Tail-
+                // truncating that whole string would cut the prefix off the HEAD first — exactly the
+                // repo identity it exists to preserve. Reserve room for the prefix and truncate only
+                // the path portion, mirroring how BRANCH reserves room for its " ⚠" suffix.
+                val repoDropped = OverviewColumn.REPO !in cols
+                val prefix = if (repoDropped && !r.pathIsRelative && r.repo != null) "${r.repo}: " else ""
+                val avail = (w - prefix.length).coerceAtLeast(1)
+                gray(prefix + PathDisplay.truncateTail(r.path, avail))
             }
         }
     }
+
+    private fun colorStatus(dirty: Boolean?, plain: String): String = when (dirty) {
+        true -> brightYellow(plain)
+        false -> brightGreen(plain)
+        null -> gray(plain)
+    }
+
+    /**
+     * Compact, frameless fallback for a very narrow terminal (Р5): two lines per worktree, no blank
+     * separators. Line 1 = status glyph + path (tail-truncated to width-2). Line 2 = two spaces,
+     * optional `⚠ reasons · `, then the branch (tail-truncated to width-2).
+     */
+    internal fun renderCompact(rows: List<OverviewRow>, width: Int): Widget {
+        val cap = (width - 2).coerceAtLeast(1)
+        val sb = StringBuilder()
+        rows.forEachIndexed { i, r ->
+            val glyph = when (r.dirty) {
+                true -> "●"
+                false -> "✓"
+                null -> "?"
+            }
+            // Repo is never a column here (compact has none), so a non-relative path always gets a
+            // "<repo>: " prefix if we have a repo name — reserve room for it first, same fix as the
+            // bordered PATH cell above, so it isn't tail-truncated away.
+            val prefix = if (!r.pathIsRelative && r.repo != null) "${r.repo}: " else ""
+            val pathAvail = (cap - prefix.length).coerceAtLeast(1)
+            val line1 = "$glyph $prefix${PathDisplay.truncateTail(r.path, pathAvail)}"
+            val orphan = if (r.orphanReasons.isNotEmpty()) "⚠ ${r.orphanReasons.joinToString("/")} · " else ""
+            val line2body = PathDisplay.truncateTail(orphan + r.branch, cap)
+            if (i > 0) sb.append('\n')
+            sb.append(colorStatus(r.dirty, line1)).append('\n')
+            sb.append("  ").append(line2body)
+        }
+        return Text(sb.toString(), whitespace = Whitespace.PRE)
+    }
 }
+
+/**
+ * A worktree overview row in PLAIN form: widths are measured on this, styling is applied at render.
+ *
+ * @param repo           repo name; null for the single-repo `list` view
+ * @param branch         short branch/label
+ * @param isMain         primary worktree → bold
+ * @param dirty          working-tree cleanliness (null = not checked)
+ * @param orphanReasons  concrete staleness signals (empty = active)
+ * @param path           ALREADY shortened via [PathDisplay.shorten]
+ * @param pathIsRelative false → path is `~/...` or absolute; when REPO is dropped its cell is
+ *                       prefixed `<repo>: ` so repo membership isn't lost
+ */
+data class OverviewRow(
+    val repo: String?,
+    val branch: String,
+    val isMain: Boolean,
+    val dirty: Boolean?,
+    val orphanReasons: List<String>,
+    val path: String,
+    val pathIsRelative: Boolean,
+)

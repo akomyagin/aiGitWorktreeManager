@@ -2,8 +2,12 @@ package dev.alkom.gwm
 
 import com.github.ajalt.clikt.core.CliktCommand
 import com.github.ajalt.clikt.core.CliktError
+import com.github.ajalt.clikt.core.context
+import com.github.ajalt.clikt.core.findObject
 import com.github.ajalt.clikt.core.main
+import com.github.ajalt.clikt.core.obj
 import com.github.ajalt.clikt.core.subcommands
+import com.github.ajalt.clikt.core.terminal
 import com.github.ajalt.clikt.parameters.arguments.argument
 import com.github.ajalt.clikt.parameters.arguments.default
 import com.github.ajalt.clikt.parameters.arguments.optional
@@ -18,6 +22,9 @@ import com.github.ajalt.mordant.terminal.Terminal
 import dev.alkom.gwm.git.WorktreeService
 import dev.alkom.gwm.git.WorktreeService.RemoveStatus
 import dev.alkom.gwm.scan.RepoScanner
+import dev.alkom.gwm.scan.RootCandidate
+import dev.alkom.gwm.scan.RootChoice
+import dev.alkom.gwm.scan.RootSelection
 import dev.alkom.gwm.scan.ScanService
 import dev.alkom.gwm.scan.WorktreeMatcher
 import dev.alkom.gwm.ui.InteractiveScreen
@@ -39,7 +46,17 @@ import java.io.File
  * `gwm --print-path foo` UX the shell wrapper depends on (docs/TECHNICAL_PLAN §5). We set
  * [invokeWithoutSubcommand] so [run] fires even when no subcommand follows the option.
  */
+/** Root-command options exposed to subcommands via the Clikt Context.obj (Р4/Р6). */
+data class GwmGlobals(val root: String?)
+
 class Gwm : CliktCommand(name = "gwm") {
+    // Р6: install the terminal into the Clikt context so subcommands inherit it and
+    // CliktCommand.test(argv, width = ...) can substitute its own — the only way to unit-test
+    // the width-dependent rendering (bugs 2/4/5).
+    init {
+        context { terminal = gwmTerminal() }
+    }
+
     override val invokeWithoutSubcommand: Boolean = true
 
     private val printPath: String? by option(
@@ -49,13 +66,16 @@ class Gwm : CliktCommand(name = "gwm") {
     )
     private val root: String? by option(
         "--root",
-        help = "корень портфеля репозиториев (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
+        help = "корень портфеля для scan и --print-path (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
     )
 
     override fun help(context: com.github.ajalt.clikt.core.Context) =
         "TUI-менеджер git worktree по локальным репозиториям"
 
     override fun run() {
+        // Must run BEFORE the early return: the subcommand's run() fires after ours and needs to
+        // see the root here. Setting it later would leave `scan` with a null root (bug 4).
+        currentContext.obj = GwmGlobals(root)
         val query = printPath ?: return
         // Machine-readable path resolution; prints exactly the path to stdout or throws a
         // CliktError (stderr + non-zero exit). See PrintPath.emit for the WHY.
@@ -128,7 +148,6 @@ private fun openRepo(repo: String): WorktreeService {
 }
 
 class ListCommand : CliktCommand(name = "list") {
-    private val terminal = gwmTerminal()
     private val repo: String by argument(help = "путь к git-репозиторию").default(".")
 
     override fun help(context: com.github.ajalt.clikt.core.Context) =
@@ -137,13 +156,18 @@ class ListCommand : CliktCommand(name = "list") {
     override fun run() {
         val service = openRepo(repo)
         val worktrees = service.withOrphanStatus(service.withDirtyFlags(service.list()))
-        terminal.println(bold("Worktrees: ${File(repo).absoluteFile.name}"))
-        terminal.println(WorktreeTable.render(worktrees))
+        // Base = the repo's PARENT dir: `gwm create`'s default layout is sibling `../<repo>-<branch>`,
+        // so relative-to-parent renders main = `repo`, linked = `repo-branch`. Anchor it in the
+        // header so the relativity isn't a mystery (Р1).
+        // normalize() so `list .` shows the real directory name (not ".") in the header/base.
+        val repoDir = File(repo).absoluteFile.normalize()
+        val base = repoDir.parentFile
+        terminal.println(bold("Worktrees: ${repoDir.name}") + gray("  (${base?.path ?: repoDir.path})"))
+        terminal.println(WorktreeTable.render(worktrees, base, terminal.size.width))
     }
 }
 
 class InteractiveCommand : CliktCommand(name = "interactive") {
-    private val terminal = gwmTerminal()
     private val repo: String by argument(help = "путь к git-репозиторию").default(".")
 
     override fun help(context: com.github.ajalt.clikt.core.Context) =
@@ -151,12 +175,11 @@ class InteractiveCommand : CliktCommand(name = "interactive") {
 
     override fun run() {
         val service = openRepo(repo)
-        InteractiveScreen(terminal, service).run()
+        InteractiveScreen(terminal, service, pathBase = File(repo).absoluteFile.normalize().parentFile).run()
     }
 }
 
 class CreateCommand : CliktCommand(name = "create") {
-    private val terminal = gwmTerminal()
     private val branch: String by argument(help = "имя новой ветки для worktree")
     private val path: String? by argument(help = "путь для worktree (по умолчанию рядом с репо)").optional()
     private val repo: String by option("--repo", help = "путь к git-репозиторию").default(".")
@@ -185,7 +208,6 @@ class CreateCommand : CliktCommand(name = "create") {
 }
 
 class RemoveCommand : CliktCommand(name = "remove") {
-    private val terminal = gwmTerminal()
     private val target: String by argument(help = "путь или имя ветки worktree")
     private val repo: String by option("--repo", help = "путь к git-репозиторию").default(".")
     private val force: Boolean by option("--force", help = "удалить даже при незакоммиченных изменениях").flag()
@@ -211,17 +233,42 @@ class RemoveCommand : CliktCommand(name = "remove") {
 }
 
 class ScanCommand : CliktCommand(name = "scan") {
-    private val terminal = gwmTerminal()
-    private val root: String? by option(
-        "--root",
-        help = "корень портфеля репозиториев (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
-    )
+    // Three ways to give the root — positional ROOT, `scan --root`, and the root command's
+    // `--root` (via context.obj). Clikt parses options after the subcommand token with the
+    // subcommand's OWN parser, so `scan --root=X` is the subcommand's option, not the root one.
+    // We can't drop either (`--root` is needed for --print-path; `scan --root` is the shipped
+    // form), so all three are reconciled to ONE value (Р4).
+    private val rootArg: String? by argument(
+        "ROOT",
+        help = "корень портфеля (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
+    ).optional()
+    private val rootOpt: String? by option("--root", help = "то же, что позиционный ROOT")
 
     override fun help(context: com.github.ajalt.clikt.core.Context) =
         "Агрегированный обзор worktree по всем репозиториям портфеля"
 
     override fun run() {
-        val rootDir = RepoScanner.resolveRoot(root)
+        val globals = currentContext.findObject<GwmGlobals>()
+        val choice = RootSelection.choose(
+            listOf(
+                RootCandidate("аргумент ROOT", rootArg),
+                RootCandidate("scan --root", rootOpt),
+                RootCandidate("gwm --root", globals?.root),
+            ),
+        )
+        val chosen = when (choice) {
+            is RootChoice.One -> choice.value
+            is RootChoice.Conflict -> throw CliktError(
+                "Корень портфеля указан несколько раз и по-разному:\n" +
+                    choice.candidates.joinToString("\n") { "  ${it.source} = ${it.value}" } +
+                    "\nУкажите его один раз.",
+            )
+        }
+
+        val rootDir = RepoScanner.resolveRoot(chosen)
+        if (!rootDir.isDirectory) {
+            throw CliktError("Корень портфеля не найден или не директория: ${rootDir.path}")
+        }
         val repos = RepoScanner.findRepos(rootDir)
         if (repos.isEmpty()) {
             terminal.println(brightYellow("Git-репозитории не найдены в: ${rootDir.path}"))
@@ -230,7 +277,7 @@ class ScanCommand : CliktCommand(name = "scan") {
 
         terminal.println(bold("Портфель: ${rootDir.path} (${repos.size} репо)"))
         val result = ScanService().scan(repos)
-        terminal.println(WorktreeTable.renderAggregated(result.worktrees))
+        terminal.println(WorktreeTable.renderAggregated(result.worktrees, rootDir, terminal.size.width))
 
         // Broken repos are reported separately so a partial scan still shows the rest.
         result.errors.forEach { err ->

@@ -87,4 +87,18 @@ class RepoScannerTest {
         val default = RepoScanner.resolveRoot(override = "   ", env = { "" })
         assertEquals(RepoScanner.defaultRoot(), default)
     }
+
+    @Test // 42
+    fun `resolveRoot expands a leading tilde to home`() {
+        val home = System.getProperty("user.home")
+        assertEquals(File("$home/x").absoluteFile, RepoScanner.resolveRoot(override = "~/x", env = { null }))
+        assertEquals(File(home).absoluteFile, RepoScanner.resolveRoot(override = "~", env = { null }))
+    }
+
+    @Test // 43
+    fun `resolveRoot does not expand tilde-user`() {
+        // "~someone/x" is another user's home — we don't resolve it, leave it literal.
+        val out = RepoScanner.resolveRoot(override = "~someone/x", env = { null })
+        assertEquals(File("~someone/x").absoluteFile, out)
+    }
 }

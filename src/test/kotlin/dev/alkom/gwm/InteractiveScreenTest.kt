@@ -3,6 +3,7 @@ package dev.alkom.gwm
 import dev.alkom.gwm.git.OrphanStatus
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.ui.InteractiveScreen
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -42,7 +43,28 @@ class InteractiveScreenTest {
         assertTrue(InteractiveScreen.rowLabel(wt("/a", "b", dirty = null)).startsWith("?"))
     }
 
-    @Test
+    @Test // 44
+    fun `rowLabel prints a path relative to base`() {
+        val base = File("/home/u/portfolio")
+        val label = InteractiveScreen.rowLabel(
+            Worktree(path = "/home/u/portfolio/repo/wt", head = "abc", branch = "b"),
+            base,
+        )
+        assertTrue("repo/wt" in label, "expected relative path: $label")
+        assertFalse("/home/u/portfolio/repo/wt" in label, "absolute path must not appear: $label")
+    }
+
+    @Test // 45
+    fun `rowLabel with null base uses tilde for a path inside home`() {
+        val home = System.getProperty("user.home")
+        val label = InteractiveScreen.rowLabel(
+            Worktree(path = "$home/deep/wt", head = "abc", branch = "b"),
+            base = null,
+        )
+        assertTrue("~/deep/wt" in label, "expected tilde form: $label")
+    }
+
+    @Test // 46
     fun `rowLabel appends the orphaned badge only when stale`() {
         val active = InteractiveScreen.rowLabel(wt("/a", "b", dirty = false))
         assertFalse("⚠" in active)

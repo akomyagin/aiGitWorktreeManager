@@ -29,13 +29,27 @@ object RepoScanner {
     fun defaultRoot(): File = File(System.getProperty("user.home"), "Projects/ai-projects")
 
     /**
+     * Expands a leading `~` / `~/...` to `$HOME`. `~user/...` is left as-is — we don't resolve
+     * other users' home directories. A path not starting with `~` is returned unchanged.
+     *
+     * Shells expand `~` before `gwm` ever sees it, but `--root=~/x` passed through a script (or
+     * `GWM_ROOT=~/x` set without expansion) arrives literal; this makes those forms work too.
+     */
+    fun expandTilde(path: String, home: String = System.getProperty("user.home")): String = when {
+        path == "~" -> home
+        path.startsWith("~/") -> home + path.substring(1)
+        else -> path // "~user/..." and everything else untouched
+    }
+
+    /**
      * Resolves the scan root from an explicit [override] (e.g. a `--root` flag), else
      * the `GWM_ROOT` env var, else [defaultRoot]. Empty/blank values are ignored so a
-     * stray `GWM_ROOT=""` doesn't silently point the scan at the filesystem root.
+     * stray `GWM_ROOT=""` doesn't silently point the scan at the filesystem root. A leading
+     * `~` in either source is expanded to `$HOME` via [expandTilde].
      */
     fun resolveRoot(override: String? = null, env: (String) -> String? = System::getenv): File {
-        override?.takeIf { it.isNotBlank() }?.let { return File(it).absoluteFile }
-        env("GWM_ROOT")?.takeIf { it.isNotBlank() }?.let { return File(it).absoluteFile }
+        override?.takeIf { it.isNotBlank() }?.let { return File(expandTilde(it)).absoluteFile }
+        env("GWM_ROOT")?.takeIf { it.isNotBlank() }?.let { return File(expandTilde(it)).absoluteFile }
         return defaultRoot()
     }
 
