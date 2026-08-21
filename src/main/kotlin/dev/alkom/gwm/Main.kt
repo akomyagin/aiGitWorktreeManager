@@ -19,6 +19,8 @@ import com.github.ajalt.mordant.rendering.TextColors.brightYellow
 import com.github.ajalt.mordant.rendering.TextColors.gray
 import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.terminal.Terminal
+import dev.alkom.gwm.config.Colors
+import dev.alkom.gwm.config.GwmConfig
 import dev.alkom.gwm.git.WorktreeService
 import dev.alkom.gwm.git.WorktreeService.RemoveStatus
 import dev.alkom.gwm.scan.RepoScanner
@@ -29,6 +31,7 @@ import dev.alkom.gwm.scan.ScanService
 import dev.alkom.gwm.scan.WorktreeMatcher
 import dev.alkom.gwm.ui.InteractiveScreen
 import dev.alkom.gwm.ui.ShellInit
+import dev.alkom.gwm.ui.TableColors
 import dev.alkom.gwm.ui.WorktreeTable
 import java.io.File
 
@@ -46,8 +49,14 @@ import java.io.File
  * `gwm --print-path foo` UX the shell wrapper depends on (docs/TECHNICAL_PLAN §5). We set
  * [invokeWithoutSubcommand] so [run] fires even when no subcommand follows the option.
  */
-/** Root-command options exposed to subcommands via the Clikt Context.obj (Р4/Р6). */
-data class GwmGlobals(val root: String?)
+/**
+ * Root-command options exposed to subcommands via the Clikt Context.obj (Р4/Р6).
+ *
+ * [config] is loaded ONCE in [Gwm.run] and carried here so subcommands see it without re-reading
+ * the file. It is the optional `~/.config/gwm/config.toml` (Этап 8): a silent fallback for the
+ * scan root, the `gwm create` path template and the status color scheme.
+ */
+data class GwmGlobals(val root: String?, val config: GwmConfig)
 
 class Gwm : CliktCommand(name = "gwm") {
     // Р6: install the terminal into the Clikt context so subcommands inherit it and
@@ -68,18 +77,30 @@ class Gwm : CliktCommand(name = "gwm") {
         "--root",
         help = "корень портфеля для scan и --print-path (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
     )
+    // Real user-facing override for the config path (Этап 8) — e.g. per-project or per-shell
+    // configs. Defaults to the standard ~/.config/gwm/config.toml (via GwmConfig.load()) when
+    // absent, so everyday usage needs no flag. Doubles as the test-injection point: command-level
+    // tests point it at a @TempDir config without touching the real one.
+    private val configPath: String? by option(
+        "--config",
+        help = "путь к config.toml (по умолчанию ~/.config/gwm/config.toml)",
+    )
 
     override fun help(context: com.github.ajalt.clikt.core.Context) =
         "TUI-менеджер git worktree по локальным репозиториям"
 
     override fun run() {
+        // Load the config ONCE, before anything else: a broken TOML must abort with a clear
+        // CliktError (stderr, non-zero exit) BEFORE any scan runs, and subcommands read it from
+        // GwmGlobals rather than re-parsing the file.
+        val config = configPath?.let { GwmConfig.load(File(it)) } ?: GwmConfig.load()
         // Must run BEFORE the early return: the subcommand's run() fires after ours and needs to
-        // see the root here. Setting it later would leave `scan` with a null root (bug 4).
-        currentContext.obj = GwmGlobals(root)
+        // see the root/config here. Setting it later would leave `scan` with a null root (bug 4).
+        currentContext.obj = GwmGlobals(root, config)
         val query = printPath ?: return
         // Machine-readable path resolution; prints exactly the path to stdout or throws a
         // CliktError (stderr + non-zero exit). See PrintPath.emit for the WHY.
-        PrintPath.emit(query, root)
+        PrintPath.emit(query, root, config.primaryRoot())
     }
 }
 
@@ -99,8 +120,8 @@ class Gwm : CliktCommand(name = "gwm") {
  * the `cd` entirely (see [ShellInit]).
  */
 object PrintPath {
-    fun emit(query: String, root: String?) {
-        val rootDir = RepoScanner.resolveRoot(root)
+    fun emit(query: String, root: String?, configRoot: String? = null) {
+        val rootDir = RepoScanner.resolveRoot(root, configRoot)
         val repos = RepoScanner.findRepos(rootDir)
         val worktrees = ScanService().scan(repos).worktrees
 
@@ -155,6 +176,7 @@ class ListCommand : CliktCommand(name = "list") {
 
     override fun run() {
         val service = openRepo(repo)
+        val colors = tableColors(currentContext.findObject<GwmGlobals>(), terminal)
         val worktrees = service.withOrphanStatus(service.withDirtyFlags(service.list()))
         // Base = the repo's PARENT dir: `gwm create`'s default layout is sibling `../<repo>-<branch>`,
         // so relative-to-parent renders main = `repo`, linked = `repo-branch`. Anchor it in the
@@ -163,8 +185,27 @@ class ListCommand : CliktCommand(name = "list") {
         val repoDir = File(repo).absoluteFile.normalize()
         val base = repoDir.parentFile
         terminal.println(bold("Worktrees: ${repoDir.name}") + gray("  (${base?.path ?: repoDir.path})"))
-        terminal.println(WorktreeTable.render(worktrees, base, terminal.size.width))
+        terminal.println(WorktreeTable.render(worktrees, base, terminal.size.width, colors))
     }
+}
+
+/**
+ * Resolves the status color scheme from the loaded config, or the historic default when no
+ * globals are present (e.g. a subcommand-only unit test). Kept in one place so every command
+ * derives colors identically. Warns (stderr, exit stays 0) about any unrecognized color name
+ * instead of silently falling back — the config never crashes the tool, but an unknown name
+ * (typo like "gren") should be visible, not silently swallowed (plan §Р6).
+ */
+private fun tableColors(globals: GwmGlobals?, terminal: Terminal): TableColors {
+    val scheme = globals?.config?.colors
+    if (scheme != null) {
+        listOf("clean" to scheme.clean, "dirty" to scheme.dirty, "muted" to scheme.muted).forEach { (role, name) ->
+            if (name != null && !Colors.isKnown(name)) {
+                terminal.println(brightYellow("⚠ неизвестный цвет '$name' для '$role' в конфиге — используется дефолт."))
+            }
+        }
+    }
+    return scheme?.let { TableColors.from(it) } ?: TableColors.DEFAULT
 }
 
 class InteractiveCommand : CliktCommand(name = "interactive") {
@@ -190,7 +231,9 @@ class CreateCommand : CliktCommand(name = "create") {
 
     override fun run() {
         val service = openRepo(repo)
-        val target = path?.let { File(it).absoluteFile } ?: service.defaultWorktreePath(branch)
+        val globals = currentContext.findObject<GwmGlobals>()
+        val template = globals?.config?.worktreePathTemplate
+        val target = path?.let { File(it).absoluteFile } ?: service.defaultWorktreePath(branch, template)
 
         if (target.exists()) {
             throw CliktError("Путь уже существует: ${target.path}")
@@ -265,7 +308,22 @@ class ScanCommand : CliktCommand(name = "scan") {
             )
         }
 
-        val rootDir = RepoScanner.resolveRoot(chosen)
+        // The config's roots[0] is a SILENT fallback (below CLI + $GWM_ROOT), NOT a RootSelection
+        // conflict source — that keeps "explicit flag beats config" without a config+flag user
+        // hitting a false conflict error (plan §Р2 / §3).
+        val configRoots = globals?.config?.roots.orEmpty()
+        val configRoot = globals?.config?.primaryRoot()
+        // configRoots is non-empty but none of them exist AND nothing else would override it —
+        // about to silently fall through to the hard default. A stale/typo'd config entry
+        // otherwise gives no signal at all that it was ignored (found in review).
+        if (chosen == null && configRoot == null && configRoots.isNotEmpty() && System.getenv("GWM_ROOT").isNullOrBlank()) {
+            terminal.println(
+                brightYellow(
+                    "⚠ ни один из корней в конфиге (${configRoots.joinToString(", ")}) не найден — используется корень по умолчанию.",
+                ),
+            )
+        }
+        val rootDir = RepoScanner.resolveRoot(chosen, configRoot)
         if (!rootDir.isDirectory) {
             throw CliktError("Корень портфеля не найден или не директория: ${rootDir.path}")
         }
@@ -277,7 +335,9 @@ class ScanCommand : CliktCommand(name = "scan") {
 
         terminal.println(bold("Портфель: ${rootDir.path} (${repos.size} репо)"))
         val result = ScanService().scan(repos)
-        terminal.println(WorktreeTable.renderAggregated(result.worktrees, rootDir, terminal.size.width))
+        terminal.println(
+            WorktreeTable.renderAggregated(result.worktrees, rootDir, terminal.size.width, tableColors(globals, terminal)),
+        )
 
         // Broken repos are reported separately so a partial scan still shows the rest.
         result.errors.forEach { err ->

@@ -101,4 +101,39 @@ class RepoScannerTest {
         val out = RepoScanner.resolveRoot(override = "~someone/x", env = { null })
         assertEquals(File("~someone/x").absoluteFile, out)
     }
+
+    @Test // 30 — Этап 8: config root as a fallback below env
+    fun `resolveRoot uses configRoot when no override and no env`() {
+        val out = RepoScanner.resolveRoot(override = null, configRoot = "/x", env = { null })
+        assertEquals(File("/x").absoluteFile, out)
+    }
+
+    @Test // 31
+    fun `override beats configRoot`() {
+        val out = RepoScanner.resolveRoot(override = "/over", configRoot = "/x", env = { null })
+        assertEquals(File("/over").absoluteFile, out)
+    }
+
+    @Test // 32
+    fun `GWM_ROOT env beats configRoot`() {
+        val out = RepoScanner.resolveRoot(
+            override = null,
+            configRoot = "/x",
+            env = { key -> if (key == "GWM_ROOT") "/env" else null },
+        )
+        assertEquals(File("/env").absoluteFile, out)
+    }
+
+    @Test // 33
+    fun `configRoot expands a leading tilde`() {
+        val home = System.getProperty("user.home")
+        val out = RepoScanner.resolveRoot(override = null, configRoot = "~/cfg", env = { null })
+        assertEquals(File("$home/cfg").absoluteFile, out)
+    }
+
+    @Test // 33b — blank configRoot is ignored, falls through to default
+    fun `blank configRoot falls through to default`() {
+        val out = RepoScanner.resolveRoot(override = null, configRoot = "  ", env = { null })
+        assertEquals(RepoScanner.defaultRoot(), out)
+    }
 }

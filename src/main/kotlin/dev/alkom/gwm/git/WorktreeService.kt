@@ -1,5 +1,6 @@
 package dev.alkom.gwm.git
 
+import dev.alkom.gwm.config.WorktreePathTemplate
 import java.io.File
 
 /**
@@ -120,16 +121,20 @@ class WorktreeService(
         git(repoDir, listOf("rev-parse", "--abbrev-ref", "$branch@{upstream}")).ok
 
     /**
-     * Default location for a new worktree of [branch]: a sibling of the repo root
-     * named `<repo>-<branch>`, with any slashes in the branch flattened to `-`
-     * (so `feature/foo` → `myrepo-feature-foo`). This mirrors the common convention
+     * Default location for a new worktree of [branch]. With no [template] this is the historic
+     * behaviour: a sibling of the repo root named `<repo>-<branch>`, with any slashes in the
+     * branch flattened to `-` (so `feature/foo` → `myrepo-feature-foo`) — the common convention
      * of keeping worktrees next to the primary checkout.
+     *
+     * A non-null [template] (from the config's `worktree-path-template`, plan §Р2) overrides the
+     * layout via [WorktreePathTemplate]'s `{parent}`/`{repo}`/`{branch}` placeholders. The path
+     * assembly is delegated to that pure helper; here we only resolve `parent` and `repo` from
+     * the primary checkout.
      */
-    fun defaultWorktreePath(branch: String): File {
+    fun defaultWorktreePath(branch: String, template: String? = null): File {
         val repoRoot = mainWorktreePath() ?: repoDir.absoluteFile
         val parent = repoRoot.absoluteFile.parentFile ?: repoRoot.absoluteFile
-        val safeBranch = branch.trim().trim('/').replace('/', '-')
-        return File(parent, "${repoRoot.name}-$safeBranch")
+        return WorktreePathTemplate.render(template, parent, repoRoot.name, branch)
     }
 
     /** Absolute path of the primary (main) worktree, or null if it can't be determined. */

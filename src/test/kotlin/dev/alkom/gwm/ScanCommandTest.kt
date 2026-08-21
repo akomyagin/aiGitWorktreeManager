@@ -61,6 +61,64 @@ class ScanCommandTest {
         assertTrue("не найден" in r.output || "не директория" in r.output, r.output)
     }
 
+    @Test // 35 — Этап 8: explicit --root overrides config roots[0]
+    fun `explicit --root beats config roots`(@TempDir cliRoot: File, @TempDir cfgRoot: File, @TempDir cfgDir: File) {
+        val cfg = File(cfgDir, "config.toml").apply { writeText("roots = [\"${cfgRoot.path}\"]\n") }
+        val r = app().test("--config=${cfg.path} --root=${cliRoot.path} scan", ansiLevel = AnsiLevel.NONE)
+        assertEquals(0, r.statusCode, r.output)
+        assertTrue(cliRoot.path in r.output, "must use the CLI root, not the config root: ${r.output}")
+        assertTrue(cfgRoot.path !in r.output, "config root must not win over --root: ${r.output}")
+    }
+
+    @Test // 35b — config roots[0] is used as a fallback when no CLI root / env is given
+    fun `config roots is used as a fallback when no CLI root`(@TempDir cfgRoot: File, @TempDir cfgDir: File) {
+        val cfg = File(cfgDir, "config.toml").apply { writeText("roots = [\"${cfgRoot.path}\"]\n") }
+        val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE)
+        assertEquals(0, r.statusCode, r.output)
+        assertTrue(cfgRoot.path in r.output, "scan must fall back to config root: ${r.output}")
+    }
+
+    @Test // 36 — broken config aborts non-zero with a clear message before scanning
+    fun `broken config fails with a config-naming message`(@TempDir cfgDir: File) {
+        val cfg = File(cfgDir, "config.toml").apply { writeText("[[bad\n") }
+        val r = app().test("--config=${cfg.path} scan /tmp", ansiLevel = AnsiLevel.NONE)
+        assertTrue(r.statusCode != 0, "broken config must be non-zero: ${r.output}")
+        assertTrue("конфиг" in r.output.lowercase(), "message must mention the config: ${r.output}")
+    }
+
+    @Test // regression: a stale/typo'd config root must not fail SILENTLY into the hard default
+    fun `all configured roots missing - warns and still falls through to the hard default`(
+        @TempDir cfgDir: File,
+        @TempDir realRoot: File,
+    ) {
+        val missing = File(cfgDir, "does-not-exist").path
+        val cfg = File(cfgDir, "config.toml").apply { writeText("roots = [\"$missing\"]\n") }
+        // No CLI root / $GWM_ROOT given, so the hard default (~/Projects/ai-projects, present on
+        // this box) is what resolveRoot falls through to — we only assert the warning fires.
+        val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE)
+        assertTrue(missing in r.output, "must name the ignored config root: ${r.output}")
+        assertTrue("не найден" in r.output, "must warn, not silently fall through: ${r.output}")
+    }
+
+    @Test // regression: unknown color name in config warns instead of silently doing nothing
+    fun `unknown color name in config warns on stderr, does not fail`(@TempDir cfgDir: File, @TempDir root: File) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+        // tableColors() is only reached once at least one repo was found — an empty root returns
+        // early before ever resolving colors, so a real minimal repo is needed here.
+        val dir = File(root, "repo").apply { mkdirs() }
+        GitCommand.run(dir, "init", "-b", "main")
+        GitCommand.run(dir, "config", "user.email", "t@e.com")
+        GitCommand.run(dir, "config", "user.name", "T")
+        File(dir, "README.md").writeText("hi\n")
+        GitCommand.run(dir, "add", "README.md")
+        GitCommand.run(dir, "commit", "-m", "init")
+
+        val cfg = File(cfgDir, "config.toml").apply { writeText("[colors]\nclean = \"chartreuse\"\n") }
+        val r = app().test("--config=${cfg.path} scan ${root.path}", ansiLevel = AnsiLevel.NONE)
+        assertEquals(0, r.statusCode, r.output)
+        assertTrue("chartreuse" in r.output, "must name the unknown color: ${r.output}")
+    }
+
     @Test // 41
     fun `real temp portfolio at width 80 - every line at most 80`(@TempDir root: File) {
         assumeTrue(gitAvailable(), "git not available on PATH")
