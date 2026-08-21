@@ -42,14 +42,25 @@ object RepoScanner {
     }
 
     /**
-     * Resolves the scan root from an explicit [override] (e.g. a `--root` flag), else
-     * the `GWM_ROOT` env var, else [defaultRoot]. Empty/blank values are ignored so a
-     * stray `GWM_ROOT=""` doesn't silently point the scan at the filesystem root. A leading
-     * `~` in either source is expanded to `$HOME` via [expandTilde].
+     * Resolves the scan root, highest priority first: an explicit [override] (e.g. a `--root`
+     * flag) → the `GWM_ROOT` env var → [configRoot] (the config's `roots[0]`, plan §Р2) →
+     * [defaultRoot]. Empty/blank values are ignored so a stray `GWM_ROOT=""` doesn't silently
+     * point the scan at the filesystem root. A leading `~` in any source is expanded to `$HOME`
+     * via [expandTilde].
+     *
+     * [configRoot] sits BELOW `$GWM_ROOT` on purpose: the invariant is "an explicit flag/env
+     * beats the config, the config beats the hard default". The config is a silent fallback here,
+     * NOT a conflict source — root-conflict detection (Этап 7 [RootSelection]) is done separately,
+     * over CLI sources only, before this is ever called.
      */
-    fun resolveRoot(override: String? = null, env: (String) -> String? = System::getenv): File {
+    fun resolveRoot(
+        override: String? = null,
+        configRoot: String? = null,
+        env: (String) -> String? = System::getenv,
+    ): File {
         override?.takeIf { it.isNotBlank() }?.let { return File(expandTilde(it)).absoluteFile }
         env("GWM_ROOT")?.takeIf { it.isNotBlank() }?.let { return File(expandTilde(it)).absoluteFile }
+        configRoot?.takeIf { it.isNotBlank() }?.let { return File(expandTilde(it)).absoluteFile }
         return defaultRoot()
     }
 

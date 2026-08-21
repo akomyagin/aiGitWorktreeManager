@@ -4,15 +4,37 @@ import com.github.ajalt.mordant.rendering.OverflowWrap
 import com.github.ajalt.mordant.rendering.TextColors.brightGreen
 import com.github.ajalt.mordant.rendering.TextColors.brightYellow
 import com.github.ajalt.mordant.rendering.TextColors.gray
+import com.github.ajalt.mordant.rendering.TextStyle
 import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.rendering.Whitespace
 import com.github.ajalt.mordant.rendering.Widget
 import com.github.ajalt.mordant.table.Borders
 import com.github.ajalt.mordant.table.table
 import com.github.ajalt.mordant.widgets.Text
+import dev.alkom.gwm.config.ColorScheme
+import dev.alkom.gwm.config.Colors
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.scan.AggregatedWorktree
 import java.io.File
+
+/**
+ * The three resolved status styles used by [WorktreeTable]. Its [DEFAULT] is the historic
+ * hard-coded Этап 7 scheme (`brightGreen`/`brightYellow`/`gray`), so a render call that passes
+ * no scheme — every existing test and code path — produces byte-identical output. A config
+ * [ColorScheme] is folded in via [from], each role falling back to its default when the name is
+ * absent or unknown (plan §Р6).
+ */
+data class TableColors(val clean: TextStyle, val dirty: TextStyle, val muted: TextStyle) {
+    companion object {
+        val DEFAULT = TableColors(clean = brightGreen, dirty = brightYellow, muted = gray)
+
+        fun from(scheme: ColorScheme): TableColors = TableColors(
+            clean = Colors.resolve(scheme.clean, DEFAULT.clean),
+            dirty = Colors.resolve(scheme.dirty, DEFAULT.dirty),
+            muted = Colors.resolve(scheme.muted, DEFAULT.muted),
+        )
+    }
+}
 
 /**
  * Shared Mordant rendering for the worktree overview (Этап 7 rewrite).
@@ -33,7 +55,8 @@ import java.io.File
 object WorktreeTable {
 
     /** Colored status cell for a worktree's dirty flag. Kept unchanged (plan §4). */
-    fun statusCell(wt: Worktree): String = colorStatus(wt.dirty, statusPlain(wt.dirty))
+    fun statusCell(wt: Worktree, colors: TableColors = TableColors.DEFAULT): String =
+        colorStatus(wt.dirty, statusPlain(wt.dirty), colors)
 
     /** One-line, safe-to-delete hint for orphaned worktrees, or null when active. Unchanged. */
     fun orphanHint(wt: Worktree): String? =
@@ -43,13 +66,27 @@ object WorktreeTable {
             null
         }
 
-    /** Single-repo overview. Base = repo's parent dir; no REPO column at any width. */
-    fun render(worktrees: List<Worktree>, base: File?, width: Int): Widget =
-        renderRows(rows(worktrees, base), width)
+    /**
+     * Single-repo overview. Base = repo's parent dir; no REPO column at any width.
+     * [colors] defaults to the historic scheme so callers/tests that omit it are unaffected.
+     */
+    fun render(
+        worktrees: List<Worktree>,
+        base: File?,
+        width: Int,
+        colors: TableColors = TableColors.DEFAULT,
+    ): Widget = renderRows(rows(worktrees, base), width, colors)
 
-    /** Multi-repo aggregated overview. Base = portfolio root; REPO column droppable by width. */
-    fun renderAggregated(worktrees: List<AggregatedWorktree>, root: File?, width: Int): Widget =
-        renderRows(rowsAggregated(worktrees, root), width)
+    /**
+     * Multi-repo aggregated overview. Base = portfolio root; REPO column droppable by width.
+     * [colors] defaults to the historic scheme so callers/tests that omit it are unaffected.
+     */
+    fun renderAggregated(
+        worktrees: List<AggregatedWorktree>,
+        root: File?,
+        width: Int,
+        colors: TableColors = TableColors.DEFAULT,
+    ): Widget = renderRows(rowsAggregated(worktrees, root), width, colors)
 
     // --- plain-row projection -------------------------------------------------------------
 
@@ -127,7 +164,11 @@ object WorktreeTable {
      * Core renderer. Chooses columns (ORPHAN only if any row is orphaned), plans widths, and either
      * renders the compact list (Р5) or a bordered table with pre-truncated, then styled, cells.
      */
-    internal fun renderRows(rows: List<OverviewRow>, width: Int): Widget {
+    internal fun renderRows(
+        rows: List<OverviewRow>,
+        width: Int,
+        colors: TableColors = TableColors.DEFAULT,
+    ): Widget {
         if (rows.isEmpty()) return Text("")
 
         val hasRepo = rows.any { it.repo != null }
@@ -141,7 +182,7 @@ object WorktreeTable {
         }
 
         val plan = TableLayout.plan(width, wanted, naturalWidths(rows, wanted))
-        if (plan.compact) return renderCompact(rows, width)
+        if (plan.compact) return renderCompact(rows, width, colors)
 
         val cols = plan.columns.map { it.first }
         val widthOf = plan.columns.toMap()
@@ -167,7 +208,7 @@ object WorktreeTable {
             }
             body {
                 rows.forEach { r ->
-                    val cells = cols.map { col -> styledCell(r, col, cols, widthOf.getValue(col)) }
+                    val cells = cols.map { col -> styledCell(r, col, cols, widthOf.getValue(col), colors) }
                     row(*cells.toTypedArray())
                 }
             }
@@ -175,7 +216,13 @@ object WorktreeTable {
     }
 
     /** Pre-truncate to the assigned width, THEN color. Never measure a colored string. */
-    private fun styledCell(r: OverviewRow, col: OverviewColumn, cols: List<OverviewColumn>, w: Int): String {
+    private fun styledCell(
+        r: OverviewRow,
+        col: OverviewColumn,
+        cols: List<OverviewColumn>,
+        w: Int,
+        colors: TableColors,
+    ): String {
         val plain = plainCell(r, col, cols)
         return when (col) {
             OverviewColumn.REPO -> {
@@ -193,8 +240,10 @@ object WorktreeTable {
                 }
                 if (r.isMain) bold(t) else t
             }
-            OverviewColumn.STATUS -> colorStatus(r.dirty, plain)
-            OverviewColumn.ORPHAN -> if (plain.isEmpty()) gray("") else brightYellow(PathDisplay.truncateHead(plain, w))
+            OverviewColumn.STATUS -> colorStatus(r.dirty, plain, colors)
+            // ORPHAN is a "needs attention" signal → the dirty (warning) role; empty → muted.
+            OverviewColumn.ORPHAN ->
+                if (plain.isEmpty()) colors.muted("") else colors.dirty(PathDisplay.truncateHead(plain, w))
             OverviewColumn.PATH -> {
                 // When REPO was dropped, `plain` starts with "<repo>: " (plainCell above). Tail-
                 // truncating that whole string would cut the prefix off the HEAD first — exactly the
@@ -203,15 +252,15 @@ object WorktreeTable {
                 val repoDropped = OverviewColumn.REPO !in cols
                 val prefix = if (repoDropped && !r.pathIsRelative && r.repo != null) "${r.repo}: " else ""
                 val avail = (w - prefix.length).coerceAtLeast(1)
-                gray(prefix + PathDisplay.truncateTail(r.path, avail))
+                colors.muted(prefix + PathDisplay.truncateTail(r.path, avail))
             }
         }
     }
 
-    private fun colorStatus(dirty: Boolean?, plain: String): String = when (dirty) {
-        true -> brightYellow(plain)
-        false -> brightGreen(plain)
-        null -> gray(plain)
+    private fun colorStatus(dirty: Boolean?, plain: String, colors: TableColors): String = when (dirty) {
+        true -> colors.dirty(plain)
+        false -> colors.clean(plain)
+        null -> colors.muted(plain)
     }
 
     /**
@@ -219,7 +268,11 @@ object WorktreeTable {
      * separators. Line 1 = status glyph + path (tail-truncated to width-2). Line 2 = two spaces,
      * optional `⚠ reasons · `, then the branch (tail-truncated to width-2).
      */
-    internal fun renderCompact(rows: List<OverviewRow>, width: Int): Widget {
+    internal fun renderCompact(
+        rows: List<OverviewRow>,
+        width: Int,
+        colors: TableColors = TableColors.DEFAULT,
+    ): Widget {
         val cap = (width - 2).coerceAtLeast(1)
         val sb = StringBuilder()
         rows.forEachIndexed { i, r ->
@@ -237,7 +290,7 @@ object WorktreeTable {
             val orphan = if (r.orphanReasons.isNotEmpty()) "⚠ ${r.orphanReasons.joinToString("/")} · " else ""
             val line2body = PathDisplay.truncateTail(orphan + r.branch, cap)
             if (i > 0) sb.append('\n')
-            sb.append(colorStatus(r.dirty, line1)).append('\n')
+            sb.append(colorStatus(r.dirty, line1, colors)).append('\n')
             sb.append("  ").append(line2body)
         }
         return Text(sb.toString(), whitespace = Whitespace.PRE)
