@@ -13,6 +13,7 @@ import com.github.ajalt.mordant.table.table
 import com.github.ajalt.mordant.widgets.Text
 import dev.alkom.gwm.config.ColorScheme
 import dev.alkom.gwm.config.Colors
+import dev.alkom.gwm.git.AheadBehind
 import dev.alkom.gwm.git.Worktree
 import dev.alkom.gwm.scan.AggregatedWorktree
 import java.io.File
@@ -54,6 +55,9 @@ data class TableColors(val clean: TextStyle, val dirty: TextStyle, val muted: Te
  */
 object WorktreeTable {
 
+    /** Default wall-clock "now" (unix seconds) for the Возраст column when a caller doesn't pass one. */
+    private fun nowEpochSec(): Long = System.currentTimeMillis() / 1000
+
     /** Colored status cell for a worktree's dirty flag. Kept unchanged (plan §4). */
     fun statusCell(wt: Worktree, colors: TableColors = TableColors.DEFAULT): String =
         colorStatus(wt.dirty, statusPlain(wt.dirty), colors)
@@ -75,7 +79,8 @@ object WorktreeTable {
         base: File?,
         width: Int,
         colors: TableColors = TableColors.DEFAULT,
-    ): Widget = renderRows(rows(worktrees, base), width, colors)
+        now: Long = nowEpochSec(),
+    ): Widget = renderRows(rows(worktrees, base), width, colors, now)
 
     /**
      * Multi-repo aggregated overview. Base = portfolio root; REPO column droppable by width.
@@ -86,7 +91,8 @@ object WorktreeTable {
         root: File?,
         width: Int,
         colors: TableColors = TableColors.DEFAULT,
-    ): Widget = renderRows(rowsAggregated(worktrees, root), width, colors)
+        now: Long = nowEpochSec(),
+    ): Widget = renderRows(rowsAggregated(worktrees, root), width, colors, now)
 
     // --- plain-row projection -------------------------------------------------------------
 
@@ -127,15 +133,23 @@ object WorktreeTable {
             path = shortened,
             pathIsRelative = relative,
             repoIsGroupStart = repoIsGroupStart,
+            aheadBehind = wt.aheadBehind,
+            lastCommitEpoch = wt.lastCommitEpoch,
         )
     }
 
     // --- layout + render ------------------------------------------------------------------
 
+    /** Placeholder shown when a worktree has no ahead/behind (no upstream) or no known age. */
+    private const val EMPTY_CELL = "—"
+
     private const val H_REPO = "Репозиторий"
     private const val H_BRANCH = "Ветка"
     private const val H_STATUS = "Статус"
     private const val H_ORPHAN = "Orphaned"
+    private const val H_AGE = "Возраст"
+    // Compact ↑ahead ↓behind header; the arrows are width-1 glyphs (verified on the built artifact).
+    private const val H_AHEAD_BEHIND = "↑↓"
     private const val H_PATH = "Путь"
 
     private fun header(col: OverviewColumn): String = when (col) {
@@ -143,13 +157,23 @@ object WorktreeTable {
         OverviewColumn.BRANCH -> H_BRANCH
         OverviewColumn.STATUS -> H_STATUS
         OverviewColumn.ORPHAN -> H_ORPHAN
+        OverviewColumn.AGE -> H_AGE
+        OverviewColumn.AHEAD_BEHIND -> H_AHEAD_BEHIND
         OverviewColumn.PATH -> H_PATH
     }
 
-    /** Natural width per column = max(header, max plain cell) over the given [cols]. */
-    internal fun naturalWidths(rows: List<OverviewRow>, cols: List<OverviewColumn>): Map<OverviewColumn, Int> =
+    /**
+     * Natural width per column = max(header, max plain cell) over the given [cols].
+     * [now] is only consulted for the AGE column (whose cell text is a function of the current time);
+     * it defaults to wall-clock time and is overridable so tests get deterministic widths.
+     */
+    internal fun naturalWidths(
+        rows: List<OverviewRow>,
+        cols: List<OverviewColumn>,
+        now: Long = nowEpochSec(),
+    ): Map<OverviewColumn, Int> =
         cols.associateWith { col ->
-            val cells = rows.map { plainCell(it, col, cols) }
+            val cells = rows.map { plainCell(it, col, cols, now) }
             (cells + header(col)).maxOf { it.length }
         }
 
@@ -159,7 +183,12 @@ object WorktreeTable {
      * dropped (→ append `⚠` to the branch) and whether REPO was dropped (→ prefix `<repo>: ` to a
      * non-relative path so repo membership isn't lost).
      */
-    private fun plainCell(r: OverviewRow, col: OverviewColumn, cols: List<OverviewColumn>): String = when (col) {
+    private fun plainCell(
+        r: OverviewRow,
+        col: OverviewColumn,
+        cols: List<OverviewColumn>,
+        now: Long,
+    ): String = when (col) {
         // Grouping (plan §Р1): blank the repo name on the 2nd+ row of a group. The group's first
         // row still returns the full name, so naturalWidths' max is unaffected (empty cells never
         // widen a column).
@@ -170,6 +199,10 @@ object WorktreeTable {
         }
         OverviewColumn.STATUS -> statusPlain(r.dirty)
         OverviewColumn.ORPHAN -> if (r.orphanReasons.isNotEmpty()) "⚠ ${r.orphanReasons.joinToString("/")}" else ""
+        // Возраст: locale-independent compact age, or `—` when we have no commit time (plan §Р3).
+        OverviewColumn.AGE -> r.lastCommitEpoch?.let { AgeFormat.relative(now, it) } ?: EMPTY_CELL
+        // Ahead/behind: `↑<ahead> ↓<behind>`, or `—` when there is no upstream (plan §Р3).
+        OverviewColumn.AHEAD_BEHIND -> r.aheadBehind?.let { "↑${it.ahead} ↓${it.behind}" } ?: EMPTY_CELL
         OverviewColumn.PATH -> {
             val repoDropped = OverviewColumn.REPO !in cols
             if (repoDropped && !r.pathIsRelative && r.repo != null) "${r.repo}: ${r.path}" else r.path
@@ -190,21 +223,28 @@ object WorktreeTable {
         rows: List<OverviewRow>,
         width: Int,
         colors: TableColors = TableColors.DEFAULT,
+        now: Long = nowEpochSec(),
     ): Widget {
         if (rows.isEmpty()) return Text("")
 
         val hasRepo = rows.any { it.repo != null }
         val anyOrphan = rows.any { it.orphanReasons.isNotEmpty() }
+        // AGE/AHEAD_BEHIND appear only when at least one row carries the data — so the single-repo
+        // `list` view (which never fills these) shows neither, preserving Этап 7 output (plan §Р5).
+        val anyAge = rows.any { it.lastCommitEpoch != null }
+        val anyAheadBehind = rows.any { it.aheadBehind != null }
         val wanted = buildList {
             if (hasRepo) add(OverviewColumn.REPO)
             add(OverviewColumn.BRANCH)
             add(OverviewColumn.STATUS)
             if (anyOrphan) add(OverviewColumn.ORPHAN)
+            if (anyAge) add(OverviewColumn.AGE)
+            if (anyAheadBehind) add(OverviewColumn.AHEAD_BEHIND)
             add(OverviewColumn.PATH)
         }
 
-        val plan = TableLayout.plan(width, wanted, naturalWidths(rows, wanted))
-        if (plan.compact) return renderCompact(rows, width, colors)
+        val plan = TableLayout.plan(width, wanted, naturalWidths(rows, wanted, now))
+        if (plan.compact) return renderCompact(rows, width, colors, now)
 
         val cols = plan.columns.map { it.first }
         val widthOf = plan.columns.toMap()
@@ -230,7 +270,7 @@ object WorktreeTable {
             }
             body {
                 rows.forEach { r ->
-                    val cells = cols.map { col -> styledCell(r, col, cols, widthOf.getValue(col), colors) }
+                    val cells = cols.map { col -> styledCell(r, col, cols, widthOf.getValue(col), colors, now) }
                     row(*cells.toTypedArray())
                 }
             }
@@ -244,8 +284,9 @@ object WorktreeTable {
         cols: List<OverviewColumn>,
         w: Int,
         colors: TableColors,
+        now: Long,
     ): String {
-        val plain = plainCell(r, col, cols)
+        val plain = plainCell(r, col, cols, now)
         return when (col) {
             OverviewColumn.REPO -> {
                 // Collapsed group row → leave it a plain empty cell, don't bold it. Branch on the
@@ -269,6 +310,12 @@ object WorktreeTable {
             // ORPHAN is a "needs attention" signal → the dirty (warning) role; empty → muted.
             OverviewColumn.ORPHAN ->
                 if (plain.isEmpty()) colors.muted("") else colors.dirty(PathDisplay.truncateHead(plain, w))
+            // AGE never shrinks per-char (dropped whole by the ladder); always muted.
+            OverviewColumn.AGE -> colors.muted(plain)
+            // Ahead/behind: behind > 0 means the branch needs pulling → the dirty (warning) role;
+            // otherwise (ahead-only, in sync, or `—`) it's neutral → muted. Never truncated.
+            OverviewColumn.AHEAD_BEHIND ->
+                if ((r.aheadBehind?.behind ?: 0) > 0) colors.dirty(plain) else colors.muted(plain)
             OverviewColumn.PATH -> {
                 // When REPO was dropped, `plain` starts with "<repo>: " (plainCell above). Tail-
                 // truncating that whole string would cut the prefix off the HEAD first — exactly the
@@ -297,6 +344,7 @@ object WorktreeTable {
         rows: List<OverviewRow>,
         width: Int,
         colors: TableColors = TableColors.DEFAULT,
+        now: Long = nowEpochSec(),
     ): Widget {
         val cap = (width - 2).coerceAtLeast(1)
         val sb = StringBuilder()
@@ -313,7 +361,10 @@ object WorktreeTable {
             val pathAvail = (cap - prefix.length).coerceAtLeast(1)
             val line1 = "$glyph $prefix${PathDisplay.truncateTail(r.path, pathAvail)}"
             val orphan = if (r.orphanReasons.isNotEmpty()) "⚠ ${r.orphanReasons.joinToString("/")} · " else ""
-            val line2body = PathDisplay.truncateTail(orphan + r.branch, cap)
+            // Age is the only Этап-8 datum small enough to keep in the compact list (ahead/behind is
+            // dropped — no room, plan §Р5); appended as `· 3д` after the branch when known.
+            val age = r.lastCommitEpoch?.let { " · ${AgeFormat.relative(now, it)}" } ?: ""
+            val line2body = PathDisplay.truncateTail(orphan + r.branch + age, cap)
             if (i > 0) sb.append('\n')
             sb.append(colorStatus(r.dirty, line1, colors)).append('\n')
             sb.append("  ").append(line2body)
@@ -336,6 +387,8 @@ object WorktreeTable {
  * @param repoIsGroupStart first row of a same-repo run → shows the name; 2nd+ rows collapse the
  *                         REPO cell to "" (plan §Р1). Always true for single-repo `list` (no REPO
  *                         column there anyway). Only affects the REPO cell when that column is present.
+ * @param aheadBehind      commits ahead/behind upstream, or null (no upstream / not computed → `—`)
+ * @param lastCommitEpoch  unix time of last commit, or null (no commit / not computed → `—`)
  */
 data class OverviewRow(
     val repo: String?,
@@ -346,4 +399,6 @@ data class OverviewRow(
     val path: String,
     val pathIsRelative: Boolean,
     val repoIsGroupStart: Boolean = true,
+    val aheadBehind: AheadBehind? = null,
+    val lastCommitEpoch: Long? = null,
 )

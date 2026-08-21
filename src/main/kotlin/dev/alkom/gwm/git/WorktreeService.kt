@@ -82,6 +82,63 @@ class WorktreeService(
     }
 
     /**
+     * Annotates each worktree with [Worktree.aheadBehind] (commits ahead/behind its upstream) and
+     * [Worktree.lastCommitEpoch] (its last commit's unix time). Kept a SEPARATE, opt-in step like
+     * [withDirtyFlags]/[withOrphanStatus] because it costs TWO extra git subprocesses per worktree
+     * (`rev-list` + `log -1`) — the expensive part callers pay for only when they want it (Этап 8).
+     *
+     * **No upstream is NOT an error.** `git rev-list … @{upstream}…` exits non-zero (128) when the
+     * branch has no configured upstream — a common, expected case (detached HEAD, purely local
+     * branches). We map that to `aheadBehind = null` (renders `—`); it never becomes an exception
+     * or a `RepoError`, so a scan of local-only worktrees stays clean and quiet (plan §Р3/§10).
+     * Likewise a bare/unborn worktree with no commit → `lastCommitEpoch = null`.
+     *
+     * Git calls go through this service's injectable [git] runner, so unit tests drive every branch
+     * (upstream present / absent / detached / no commits) with a fake and no real repository.
+     */
+    fun withAheadBehindAndAge(worktrees: List<Worktree>): List<Worktree> =
+        worktrees.map { wt ->
+            wt.copy(
+                aheadBehind = aheadBehindOf(wt),
+                lastCommitEpoch = lastCommitEpochOf(wt),
+            )
+        }
+
+    /**
+     * Ahead/behind of [wt] versus its upstream, or null when it has none / can't be determined.
+     *
+     * Uses `git rev-list --left-right --count HEAD...<branch>@{upstream}` inside the worktree dir.
+     * With this range order git prints `<ahead>\t<behind>` (LEFT = HEAD-only commits = ahead, RIGHT
+     * = upstream-only commits = behind) — verified empirically, see [parseAheadBehind]. Detached
+     * worktrees have no branch → null without even calling git.
+     *
+     * The "no upstream" check is narrowed via [hasUpstream] (the same probe [withOrphanStatus] uses)
+     * BEFORE running `rev-list`, rather than folding every non-zero `rev-list` exit into "no upstream"
+     * — `rev-list` can also fail for unrelated reasons (corrupted refs, a deleted upstream branch),
+     * and conflating those with the common, expected no-upstream case would silently hide a real
+     * problem behind the same `—` a clean local-only branch shows (found on independent review).
+     */
+    private fun aheadBehindOf(wt: Worktree): AheadBehind? {
+        val branch = wt.branch ?: return null
+        if (!hasUpstream(branch)) return null
+        val res = git(File(wt.path), listOf("rev-list", "--left-right", "--count", "HEAD...$branch@{upstream}"))
+        if (!res.ok) return null // upstream exists but rev-list still failed — rare; quiet scans (plan §Р3/§10)
+        return parseAheadBehind(res.stdout)
+    }
+
+    /**
+     * Unix timestamp (seconds) of [wt]'s last commit via `git log -1 --format=%ct`, or null when the
+     * worktree has no commit (bare, unborn branch) or git fails. We format the age from this ourselves
+     * ([dev.alkom.gwm.ui.AgeFormat]) rather than using `%cr`, which is localized (plan §Р3).
+     */
+    private fun lastCommitEpochOf(wt: Worktree): Long? {
+        if (wt.isBare) return null
+        val res = git(File(wt.path), listOf("log", "-1", "--format=%ct"))
+        if (!res.ok) return null
+        return res.stdout.trim().toLongOrNull()
+    }
+
+    /**
      * The repository's base branch — `main` or `master`, whichever exists as a local
      * ref (preferring `main`). Used as the target for the "branch already merged" check.
      * Returns null when neither is present, in which case the merged signal is skipped.

@@ -20,11 +20,32 @@ class TableLayoutTest {
         OverviewColumn.PATH,
     )
 
+    // Full Этап-8 set including AGE + AHEAD_BEHIND, in render order (they sit just before PATH).
+    private val ALL8 = listOf(
+        OverviewColumn.REPO,
+        OverviewColumn.BRANCH,
+        OverviewColumn.STATUS,
+        OverviewColumn.ORPHAN,
+        OverviewColumn.AGE,
+        OverviewColumn.AHEAD_BEHIND,
+        OverviewColumn.PATH,
+    )
+
     private fun natural(repo: Int, branch: Int, status: Int, orphan: Int, path: Int) = mapOf(
         OverviewColumn.REPO to repo,
         OverviewColumn.BRANCH to branch,
         OverviewColumn.STATUS to status,
         OverviewColumn.ORPHAN to orphan,
+        OverviewColumn.PATH to path,
+    )
+
+    private fun natural8(repo: Int, branch: Int, status: Int, orphan: Int, age: Int, ab: Int, path: Int) = mapOf(
+        OverviewColumn.REPO to repo,
+        OverviewColumn.BRANCH to branch,
+        OverviewColumn.STATUS to status,
+        OverviewColumn.ORPHAN to orphan,
+        OverviewColumn.AGE to age,
+        OverviewColumn.AHEAD_BEHIND to ab,
         OverviewColumn.PATH to path,
     )
 
@@ -124,6 +145,98 @@ class TableLayoutTest {
         val nat = natural(repo = 23, branch = 25, status = 7, orphan = 12, path = 50)
         for (w in 30..200) {
             val plan = TableLayout.plan(w, ALL, nat)
+            val sum = plan.columns.sumOf { it.second }
+            assertTrue(
+                sum + TableLayout.chrome(plan.columns.size) <= w,
+                "width $w: sum $sum + chrome(${plan.columns.size}) > $w",
+            )
+            if (!plan.compact) {
+                val pathW = plan.columns.first { it.first == OverviewColumn.PATH }.second
+                val floor = minOf(nat.getValue(OverviewColumn.PATH), TableLayout.MIN_PATH)
+                assertTrue(pathW >= floor, "width $w: path $pathW < floor $floor")
+            }
+        }
+    }
+
+    // --- Этап 8: AGE + AHEAD_BEHIND columns and the rewritten degradation ladder (cases 54-59) ---
+
+    private fun colsOf(plan: dev.alkom.gwm.ui.LayoutPlan) = plan.columns.map { it.first }
+
+    @Test // 54 — wide: everything fits, PATH at least PREFERRED
+    fun `width 200 keeps all seven columns with AGE and AHEAD_BEHIND`() {
+        val nat = natural8(repo = 23, branch = 20, status = 7, orphan = 12, age = 6, ab = 8, path = 40)
+        val plan = TableLayout.plan(200, ALL8, nat)
+        assertEquals(7, plan.columns.size, "all seven columns at 200")
+        assertTrue(OverviewColumn.AGE in colsOf(plan) && OverviewColumn.AHEAD_BEHIND in colsOf(plan))
+        assertFits(200, plan)
+    }
+
+    @Test // 55 — AHEAD_BEHIND is the FIRST to drop, before REPO
+    fun `AHEAD_BEHIND drops before REPO`() {
+        // Choose a width where exactly one nice-to-have must go: dropping AHEAD_BEHIND lets the rest fit.
+        val nat = natural8(repo = 20, branch = 18, status = 7, orphan = 0, age = 6, ab = 8, path = 40)
+        val wanted = ALL8 - OverviewColumn.ORPHAN // no orphan rows
+        // Find the smallest width that still keeps REPO but has dropped AHEAD_BEHIND.
+        var found = false
+        for (w in 60..200) {
+            val cols = colsOf(TableLayout.plan(w, wanted, nat))
+            if (OverviewColumn.REPO in cols && OverviewColumn.AHEAD_BEHIND !in cols && OverviewColumn.AGE in cols) {
+                found = true
+                break
+            }
+        }
+        assertTrue(found, "there must be a width band where AHEAD_BEHIND is dropped but REPO+AGE remain")
+    }
+
+    @Test // 56 — next rung: AGE dropped while REPO still present
+    fun `AGE drops before REPO`() {
+        val nat = natural8(repo = 20, branch = 18, status = 7, orphan = 0, age = 6, ab = 8, path = 40)
+        val wanted = ALL8 - OverviewColumn.ORPHAN
+        var found = false
+        for (w in 50..200) {
+            val cols = colsOf(TableLayout.plan(w, wanted, nat))
+            if (OverviewColumn.REPO in cols && OverviewColumn.AGE !in cols && OverviewColumn.AHEAD_BEHIND !in cols) {
+                found = true
+                break
+            }
+        }
+        assertTrue(found, "there must be a width band where AGE+AHEAD_BEHIND are dropped but REPO remains")
+    }
+
+    @Test // 57 — REPO drops only AFTER both nice-to-haves are gone (order of Р5)
+    fun `REPO drops only after AGE and AHEAD_BEHIND`() {
+        val nat = natural8(repo = 23, branch = 25, status = 7, orphan = 12, age = 6, ab = 8, path = 50)
+        for (w in 30..200) {
+            val cols = colsOf(TableLayout.plan(w, ALL8, nat))
+            // Invariant: if REPO is present, AGE/AHEAD_BEHIND may or may not be; but if REPO is
+            // DROPPED, then AGE and AHEAD_BEHIND must ALSO be dropped (they go first).
+            if (OverviewColumn.REPO !in cols && cols.isNotEmpty()) {
+                assertTrue(
+                    OverviewColumn.AGE !in cols && OverviewColumn.AHEAD_BEHIND !in cols,
+                    "width $w: REPO dropped but a nice-to-have survived: $cols",
+                )
+            }
+        }
+    }
+
+    @Test // 58 — AGE / AHEAD_BEHIND never shrink per-char: they are either at natural width or absent
+    fun `AGE and AHEAD_BEHIND are never squeezed below natural`() {
+        val nat = natural8(repo = 23, branch = 25, status = 7, orphan = 12, age = 6, ab = 8, path = 50)
+        for (w in 30..200) {
+            val plan = TableLayout.plan(w, ALL8, nat)
+            plan.columns.forEach { (col, assigned) ->
+                if (col == OverviewColumn.AGE || col == OverviewColumn.AHEAD_BEHIND) {
+                    assertEquals(nat.getValue(col), assigned, "width $w: $col shrunk to $assigned")
+                }
+            }
+        }
+    }
+
+    @Test // 59 — sweep invariant with the full Этап-8 column set
+    fun `invariant holds across the width sweep with AGE and AHEAD_BEHIND`() {
+        val nat = natural8(repo = 23, branch = 25, status = 7, orphan = 12, age = 6, ab = 8, path = 50)
+        for (w in 30..220) {
+            val plan = TableLayout.plan(w, ALL8, nat)
             val sum = plan.columns.sumOf { it.second }
             assertTrue(
                 sum + TableLayout.chrome(plan.columns.size) <= w,
