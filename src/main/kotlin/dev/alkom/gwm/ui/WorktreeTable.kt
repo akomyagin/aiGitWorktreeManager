@@ -93,10 +93,28 @@ object WorktreeTable {
     internal fun rows(worktrees: List<Worktree>, base: File?): List<OverviewRow> =
         worktrees.map { wt -> row(repo = null, wt = wt, base = base) }
 
-    internal fun rowsAggregated(worktrees: List<AggregatedWorktree>, root: File?): List<OverviewRow> =
-        worktrees.map { agg -> row(repo = agg.repo, wt = agg.worktree, base = root) }
+    internal fun rowsAggregated(worktrees: List<AggregatedWorktree>, root: File?): List<OverviewRow> {
+        // Grouping (plan §Р1): the repo name is shown ONLY on the first row of each consecutive
+        // run of the same repo; on the 2nd+ rows its REPO cell collapses to "". The row ORDER is
+        // untouched — this relies on ScanService (via flatMap over per-repo results) already
+        // returning worktrees grouped by repo, so a "group" is simply a maximal run of equal repo
+        // names; a caller that ever interleaves repos would silently re-print the same name in
+        // more than one run. Purely visual; measurement is unaffected because the group's first
+        // row still carries the full name (see plainCell REPO / naturalWidths).
+        var prevRepo: String? = null
+        return worktrees.map { agg ->
+            val isStart = agg.repo != prevRepo
+            prevRepo = agg.repo
+            row(repo = agg.repo, wt = agg.worktree, base = root, repoIsGroupStart = isStart)
+        }
+    }
 
-    private fun row(repo: String?, wt: Worktree, base: File?): OverviewRow {
+    private fun row(
+        repo: String?,
+        wt: Worktree,
+        base: File?,
+        repoIsGroupStart: Boolean = true,
+    ): OverviewRow {
         val shortened = PathDisplay.shorten(wt.path, base)
         // Relative iff it did not fall back to "~/..." or an absolute path.
         val relative = !shortened.startsWith("~") && !shortened.startsWith("/")
@@ -108,6 +126,7 @@ object WorktreeTable {
             orphanReasons = if (wt.orphan.isOrphaned) wt.orphan.reasons else emptyList(),
             path = shortened,
             pathIsRelative = relative,
+            repoIsGroupStart = repoIsGroupStart,
         )
     }
 
@@ -141,7 +160,10 @@ object WorktreeTable {
      * non-relative path so repo membership isn't lost).
      */
     private fun plainCell(r: OverviewRow, col: OverviewColumn, cols: List<OverviewColumn>): String = when (col) {
-        OverviewColumn.REPO -> r.repo ?: ""
+        // Grouping (plan §Р1): blank the repo name on the 2nd+ row of a group. The group's first
+        // row still returns the full name, so naturalWidths' max is unaffected (empty cells never
+        // widen a column).
+        OverviewColumn.REPO -> if (r.repoIsGroupStart) r.repo ?: "" else ""
         OverviewColumn.BRANCH -> {
             val orphanDropped = OverviewColumn.ORPHAN !in cols
             if (orphanDropped && r.orphanReasons.isNotEmpty()) "${r.branch} ⚠" else r.branch
@@ -226,8 +248,11 @@ object WorktreeTable {
         val plain = plainCell(r, col, cols)
         return when (col) {
             OverviewColumn.REPO -> {
-                val t = PathDisplay.truncateHead(plain, w)
-                bold(t)
+                // Collapsed group row → leave it a plain empty cell, don't bold it. Branch on the
+                // authoritative flag, not plain.isEmpty() — a repo name is never blank in practice,
+                // but deriving "is this collapsed" from string emptiness re-guesses a fact the row
+                // already carries explicitly.
+                if (!r.repoIsGroupStart) "" else bold(PathDisplay.truncateHead(plain, w))
             }
             OverviewColumn.BRANCH -> {
                 // When ORPHAN was dropped, plain ends in " ⚠". Head-truncating the whole cell would
@@ -305,9 +330,12 @@ object WorktreeTable {
  * @param isMain         primary worktree → bold
  * @param dirty          working-tree cleanliness (null = not checked)
  * @param orphanReasons  concrete staleness signals (empty = active)
- * @param path           ALREADY shortened via [PathDisplay.shorten]
- * @param pathIsRelative false → path is `~/...` or absolute; when REPO is dropped its cell is
- *                       prefixed `<repo>: ` so repo membership isn't lost
+ * @param path             ALREADY shortened via [PathDisplay.shorten]
+ * @param pathIsRelative   false → path is `~/...` or absolute; when REPO is dropped its cell is
+ *                         prefixed `<repo>: ` so repo membership isn't lost
+ * @param repoIsGroupStart first row of a same-repo run → shows the name; 2nd+ rows collapse the
+ *                         REPO cell to "" (plan §Р1). Always true for single-repo `list` (no REPO
+ *                         column there anyway). Only affects the REPO cell when that column is present.
  */
 data class OverviewRow(
     val repo: String?,
@@ -317,4 +345,5 @@ data class OverviewRow(
     val orphanReasons: List<String>,
     val path: String,
     val pathIsRelative: Boolean,
+    val repoIsGroupStart: Boolean = true,
 )
