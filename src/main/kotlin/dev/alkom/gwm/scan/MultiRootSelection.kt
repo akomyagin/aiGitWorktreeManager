@@ -72,6 +72,15 @@ fun formatAllRootsMissingWarning(missing: List<String>): String =
     "⚠ ни один из корней в конфиге (${missing.joinToString(", ")}) не найден — используется корень по умолчанию."
 
 /**
+ * Reusable, provider-agnostic warning TEXT for a broken repo encountered mid-scan (a [RepoError]).
+ * Shared by `scan` and `clean` (Этап 10) so the two callers can never drift on wording — only the
+ * coloring/stream is decided by the caller (both currently `brightYellow` via `terminal.println`),
+ * matching the [formatMissingRootsWarning] pattern.
+ */
+fun formatRepoErrorWarning(err: RepoError): String =
+    "⚠ ${err.repo}: ${err.reason.trim()}"
+
+/**
  * The repos to scan for an already-resolved [ResolvedRoots]: every root's immediate git-repo
  * children ([RepoScanner.findRepos]), deduplicated across roots ([ScanService.dedupRepos]) so a
  * physical repo reachable from two roots is counted once. Shared by `scan` and `--print-path` (fix

@@ -19,10 +19,13 @@ import com.github.ajalt.mordant.rendering.TextColors.brightYellow
 import com.github.ajalt.mordant.rendering.TextColors.gray
 import com.github.ajalt.mordant.rendering.TextStyles.bold
 import com.github.ajalt.mordant.terminal.Terminal
+import com.github.ajalt.mordant.terminal.YesNoPrompt
 import dev.alkom.gwm.config.Colors
 import dev.alkom.gwm.config.GwmConfig
 import dev.alkom.gwm.git.WorktreeService
 import dev.alkom.gwm.git.WorktreeService.RemoveStatus
+import dev.alkom.gwm.scan.BulkCleanPlan
+import dev.alkom.gwm.scan.CleanCandidate
 import dev.alkom.gwm.scan.MultiRootSelection
 import dev.alkom.gwm.scan.RepoScanner
 import dev.alkom.gwm.scan.RootCandidate
@@ -32,7 +35,9 @@ import dev.alkom.gwm.scan.ScanService
 import dev.alkom.gwm.scan.WorktreeMatcher
 import dev.alkom.gwm.scan.formatAllRootsMissingWarning
 import dev.alkom.gwm.scan.formatMissingRootsWarning
+import dev.alkom.gwm.scan.formatRepoErrorWarning
 import dev.alkom.gwm.scan.reposToScan
+import dev.alkom.gwm.ui.CleanReport
 import dev.alkom.gwm.ui.InteractiveScreen
 import dev.alkom.gwm.ui.ShellInit
 import dev.alkom.gwm.ui.TableColors
@@ -321,6 +326,95 @@ class RemoveCommand : CliktCommand(name = "remove") {
  * worktrees from every existing `config.roots` entry the same way this command does (see [PrintPath]'s
  * KDoc for its side of the contract: stderr diagnostics, stdout untouched).
  */
+/**
+ * Reconciles the three portfolio-root CLI sources (positional [rootArg], `--root` [rootOpt], and the
+ * root command's `gwm --root` from [globals]) into the roots to scan, applying the same
+ * override-vs-multi-root fork [ScanCommand] and `--print-path` use. Extracted so `scan` and `clean`
+ * (Этап 10) share ONE implementation of root resolution + diagnostics instead of drifting copies.
+ *
+ * Side effects match `scan`'s established contract: it prints multi-root warnings to stdout via
+ * [terminal] (exit stays 0) and turns a missing single/default root into a [CliktError] (non-zero
+ * exit). Returns the existing roots to scan (never empty on normal return — an empty resolution is
+ * already a thrown error).
+ */
+private fun com.github.ajalt.clikt.core.CliktCommand.resolvePortfolioRoots(
+    rootArg: String?,
+    rootOpt: String?,
+    globals: GwmGlobals?,
+    subcommandLabel: String,
+): List<File> {
+    val choice = RootSelection.choose(
+        listOf(
+            RootCandidate("аргумент ROOT", rootArg),
+            // subcommandLabel names the invoking subcommand's own --root ("scan --root" / "clean --root")
+            // so a conflict message points at the exact flag the user typed, not a generic "--root".
+            RootCandidate(subcommandLabel, rootOpt),
+            RootCandidate("gwm --root", globals?.root),
+        ),
+    )
+    val chosen = when (choice) {
+        is RootChoice.One -> choice.value
+        is RootChoice.Conflict -> throw CliktError(
+            "Корень портфеля указан несколько раз и по-разному:\n" +
+                choice.candidates.joinToString("\n") { "  ${it.source} = ${it.value}" } +
+                "\nУкажите его один раз.",
+        )
+    }
+
+    // Shared override-vs-multi-root fork (Этап 9 Р1). It returns roots + diagnostics and does no I/O
+    // itself, so we render the diagnostics scan's way: warnings to stdout (terminal.println), a
+    // missing single/default root as a CliktError. See MultiRootSelection.resolveRootsToScan.
+    val rr = MultiRootSelection.resolveRootsToScan(chosen, globals?.config?.roots.orEmpty())
+    if (rr.singleRootOverride) {
+        if (rr.roots.isEmpty()) {
+            // The explicit CLI/env root does not exist — same hard error as Этап 7/8. rejectedSingleRoot
+            // is the File resolveRootsToScan already resolved internally — no need to re-resolve it here.
+            throw CliktError(
+                "Корень портфеля не найден или не директория: ${rr.rejectedSingleRoot?.path}",
+            )
+        }
+    } else {
+        // A stale/typo'd config entry otherwise gives no signal it was ignored — generalises
+        // Этап 8's warning (plan §Р5, §Р8). exit stays 0.
+        if (rr.missing.isNotEmpty() && rr.roots.isNotEmpty()) {
+            terminal.println(brightYellow(formatMissingRootsWarning(rr.missing)))
+        }
+        if (rr.fellBackToDefaultFromMissing) {
+            terminal.println(brightYellow(formatAllRootsMissingWarning(rr.missing)))
+        }
+        if (rr.roots.isEmpty()) {
+            // Multi-root branch fell back to the default, but even that doesn't exist (Этап 9 bug 1).
+            throw CliktError("Корень портфеля не найден или не директория: ${RepoScanner.defaultRoot().path}")
+        }
+    }
+    return rr.roots
+}
+
+/**
+ * Collects the deduplicated portfolio repos for [rootsToScan] and reports an empty portfolio the
+ * `scan` way (a warning to stdout, exit stays 0). Extracted so `scan` and `clean` (Этап 10) share ONE
+ * copy of the base + dedup + empty-check block instead of drifting duplicates.
+ *
+ * Returns the relative-path anchor [base] (the single root, or null when several) and the repos, or
+ * null when no repos were found (the caller returns early — an empty portfolio is not an error, plan
+ * §Р5). The warning text is byte-identical to what both commands printed before.
+ */
+private fun com.github.ajalt.clikt.core.CliktCommand.collectPortfolioRepos(
+    rootsToScan: List<File>,
+): Pair<File?, List<File>>? {
+    // One root → anchor relative paths to it (identical to Этап 8, keeps output byte-stable);
+    // several → no common base, PathDisplay falls back to ~/… or absolute (Р6).
+    val base: File? = rootsToScan.singleOrNull()
+    // Collect repos from every root, then dedup a physical repo reachable from >1 root (Р3/Р4).
+    val repos = ScanService.dedupRepos(rootsToScan.flatMap { RepoScanner.findRepos(it) })
+    if (repos.isEmpty()) {
+        val where = rootsToScan.joinToString(", ") { it.path }
+        terminal.println(brightYellow("Git-репозитории не найдены в: $where"))
+        return null
+    }
+    return base to repos
+}
+
 class ScanCommand : CliktCommand(name = "scan") {
     // Three ways to give the root — positional ROOT, `scan --root`, and the root command's
     // `--root` (via context.obj). Clikt parses options after the subcommand token with the
@@ -338,61 +432,8 @@ class ScanCommand : CliktCommand(name = "scan") {
 
     override fun run() {
         val globals = currentContext.findObject<GwmGlobals>()
-        val choice = RootSelection.choose(
-            listOf(
-                RootCandidate("аргумент ROOT", rootArg),
-                RootCandidate("scan --root", rootOpt),
-                RootCandidate("gwm --root", globals?.root),
-            ),
-        )
-        val chosen = when (choice) {
-            is RootChoice.One -> choice.value
-            is RootChoice.Conflict -> throw CliktError(
-                "Корень портфеля указан несколько раз и по-разному:\n" +
-                    choice.candidates.joinToString("\n") { "  ${it.source} = ${it.value}" } +
-                    "\nУкажите его один раз.",
-            )
-        }
-
-        // Resolve the roots to scan via the shared override-vs-multi-root fork (Этап 9 Р1; the same
-        // helper now backs --print-path). It returns roots + diagnostics and does no I/O itself, so
-        // scan renders the diagnostics its own way: warnings to stdout (terminal.println), a missing
-        // single/default root as a CliktError. See MultiRootSelection.resolveRootsToScan / ResolvedRoots.
-        val rr = MultiRootSelection.resolveRootsToScan(chosen, globals?.config?.roots.orEmpty())
-        if (rr.singleRootOverride) {
-            if (rr.roots.isEmpty()) {
-                // The explicit CLI/env root does not exist — same hard error as Этап 7/8. rejectedSingleRoot
-                // is the File resolveRootsToScan already resolved internally — no need to re-resolve it here.
-                throw CliktError(
-                    "Корень портфеля не найден или не директория: ${rr.rejectedSingleRoot?.path}",
-                )
-            }
-        } else {
-            // A stale/typo'd config entry otherwise gives no signal it was ignored — generalises
-            // Этап 8's warning (plan §Р5, §Р8). exit stays 0.
-            if (rr.missing.isNotEmpty() && rr.roots.isNotEmpty()) {
-                terminal.println(brightYellow(formatMissingRootsWarning(rr.missing)))
-            }
-            if (rr.fellBackToDefaultFromMissing) {
-                terminal.println(brightYellow(formatAllRootsMissingWarning(rr.missing)))
-            }
-            if (rr.roots.isEmpty()) {
-                // Multi-root branch fell back to the default, but even that doesn't exist (Этап 9 bug 1).
-                throw CliktError("Корень портфеля не найден или не директория: ${RepoScanner.defaultRoot().path}")
-            }
-        }
-        val rootsToScan = rr.roots
-        // One root → anchor relative paths to it (identical to Этап 8, keeps output byte-stable);
-        // several → no common base, PathDisplay falls back to ~/… or absolute (Р6).
-        val base: File? = rootsToScan.singleOrNull()
-
-        // Collect repos from every root, then dedup a physical repo reachable from >1 root (Р3/Р4).
-        val repos = rr.reposToScan()
-        if (repos.isEmpty()) {
-            val where = rootsToScan.joinToString(", ") { it.path }
-            terminal.println(brightYellow("Git-репозитории не найдены в: $where"))
-            return
-        }
+        val rootsToScan = resolvePortfolioRoots(rootArg, rootOpt, globals, subcommandLabel = "scan --root")
+        val (base, repos) = collectPortfolioRepos(rootsToScan) ?: return
 
         // Header: one root reads as Этап 8 (path + count); several announce multiplicity + the list
         // of roots actually scanned, so the user never wonders what was aggregated (Р6).
@@ -411,7 +452,284 @@ class ScanCommand : CliktCommand(name = "scan") {
 
         // Broken repos are reported separately so a partial scan still shows the rest.
         result.errors.forEach { err ->
-            terminal.println(brightYellow("⚠ ${err.repo}: ${err.reason.trim()}"))
+            terminal.println(brightYellow(formatRepoErrorWarning(err)))
+        }
+    }
+}
+
+/**
+ * `gwm clean` — the portfolio-wide bulk removal of orphaned worktrees (Этап 10). The FIRST
+ * destructive bulk operation in the tool; it does not weaken any existing safety invariant, it
+ * reuses them (`safeRemove` → BLOCKED_DIRTY, explicit `--force`) and adds an aggregated confirmation
+ * gate on top.
+ *
+ * **Safety invariants (plan §Инвариант безопасности) — hard-coded here:**
+ *  1. No deletion without explicit consent: the aggregated [YesNoPrompt] answered "yes" OR `--yes`.
+ *     Default (no flag, no TTY) deletes NOTHING.
+ *  2. A dirty worktree is deleted ONLY with `--force`, and even then only via a per-item confirmation
+ *     (TTY) or the pair `--yes --force` together — one blanket "yes" NEVER triggers a dirty deletion.
+ *  3. The main worktree is never a candidate ([BulkCleanPlan.from] filters `!isMain` explicitly).
+ *  4. Every real deletion goes through [WorktreeService.safeRemove] (real `git worktree remove`),
+ *     which re-checks dirtiness at deletion time (race guard) — we never bypass it.
+ *  5. Rejection paths raise [CliktError] (non-zero exit). Success — including "nothing to delete" and
+ *     "cancelled" — is exit 0.
+ *
+ * **Scope: the whole portfolio, same fork as `scan`.** Reuses [resolvePortfolioRoots] →
+ * [MultiRootSelection], so `clean` aggregates every existing `config.roots` entry unless a CLI root /
+ * `$GWM_ROOT` overrides to one.
+ *
+ * **Deletion is grouped by repo directory (plan §variant б).** [AggregatedWorktree] carries the repo
+ * NAME but not its [File]; to open the right [WorktreeService] — and to stay correct when two roots
+ * hold same-named repos — we iterate the actual repo dirs and match a candidate to a repo via
+ * `WorktreeService.findWorktree(path) != null` (one `git worktree list` per repo).
+ */
+class CleanCommand : CliktCommand(name = "clean") {
+    // Portfolio root, exactly like ScanCommand: positional ROOT, `--root`, and the root `gwm --root`
+    // (via globals) are reconciled to one value in resolvePortfolioRoots. No CLI root + no $GWM_ROOT
+    // → multi-root over config.roots.
+    private val rootArg: String? by argument(
+        "ROOT",
+        help = "корень портфеля (по умолчанию ~/Projects/ai-projects или \$GWM_ROOT)",
+    ).optional()
+    private val rootOpt: String? by option("--root", help = "то же, что позиционный ROOT")
+    private val dryRun: Boolean by option("--dry-run", help = "показать кандидатов и выйти, ничего не удаляя").flag()
+    private val assumeYes: Boolean by option(
+        "--yes", "-y",
+        help = "не спрашивать подтверждение списка (для скриптов); dirty всё равно требуют --force",
+    ).flag()
+    private val force: Boolean by option(
+        "--force",
+        help = "разрешить удаление dirty worktree (с отдельным подтверждением на каждый; с --yes --force — без запроса)",
+    ).flag()
+
+    override fun help(context: com.github.ajalt.clikt.core.Context) =
+        "Найти и удалить orphaned worktree по всему портфелю (с подтверждением; dirty — только с --force)"
+
+    override fun run() {
+        val globals = currentContext.findObject<GwmGlobals>()
+        val rootsToScan = resolvePortfolioRoots(rootArg, rootOpt, globals, subcommandLabel = "clean --root")
+        val (base, repos) = collectPortfolioRepos(rootsToScan) ?: return
+
+        val result = ScanService().scan(repos)
+        // Scan-level errors (broken repos) are warnings, like `scan` — a partial scan still cleans the rest.
+        result.errors.forEach { err ->
+            terminal.println(brightYellow(formatRepoErrorWarning(err)))
+        }
+
+        val plan = BulkCleanPlan.from(result.worktrees)
+        if (plan.isEmpty) {
+            // "Nothing to delete" is success, exit 0 (invariant §6) — NOT a CliktError.
+            terminal.println("Orphaned worktree не найдено — нечего удалять.")
+            return
+        }
+
+        // Show the FULL candidate list BEFORE any deletion (invariant: consent is on this exact list).
+        terminal.println(bold("Кандидаты на удаление (orphaned worktree):"))
+        plan.candidates.forEach { c ->
+            val line = CleanReport.candidateLine(c, base)
+            terminal.println(if (c.dirty) brightYellow(line) else line)
+        }
+        terminal.println(gray("Всего ${plan.total}, из них dirty ${plan.dirtyCount}."))
+
+        if (dryRun) {
+            // A cheap, explicit rehearsal: print what WOULD happen and stop. exit 0.
+            //
+            // The prediction must match the REAL consent logic below, or it lies. Non-dirty candidates
+            // are always deleted once the run proceeds. Dirty candidates are deleted WITHOUT a further
+            // prompt ONLY under `--yes --force` (the one combination that skips the per-item prompt);
+            // with `--force` but no `--yes` each dirty still needs an interactive per-item "yes", so we
+            // must NOT promise it will be deleted — it merely "requires confirmation"; without `--force`
+            // every dirty is unconditionally skipped.
+            val wouldDelete = plan.cleanCandidates.size + if (assumeYes && force) plan.dirtyCount else 0
+            val dirtyNeedsConfirm = force && !assumeYes // interactive per-item prompt, outcome not decidable here
+            val wouldSkip = if (force) 0 else plan.dirtyCount // dirty unconditionally skipped without --force
+            terminal.println(
+                gray(
+                    "[dry-run] было бы удалено: $wouldDelete" +
+                        (if (dirtyNeedsConfirm && plan.dirtyCount > 0) {
+                            ", потребуют подтверждения (dirty, --force): ${plan.dirtyCount}"
+                        } else {
+                            ""
+                        }) +
+                        (if (wouldSkip > 0) ", пропущено (dirty, нужен --force): $wouldSkip" else "") +
+                        ". Ничего не удалено.",
+                ),
+            )
+            return
+        }
+
+        // Aggregated gate (one for the whole run). `--yes` replaces it for scripts; without a TTY and
+        // without `--yes` we REFUSE (CliktError) rather than silently deleting or hanging on a prompt.
+        val proceed = when {
+            assumeYes -> true
+            terminal.terminalInfo.inputInteractive -> YesNoPrompt(
+                "Удалить ${plan.total} orphaned worktree (из них ${plan.dirtyCount} dirty будут пропущены без --force)?",
+                terminal,
+                default = false,
+            ).ask() ?: false
+
+            else -> throw CliktError(
+                "Требуется подтверждение, но терминал не интерактивен. " +
+                    "Повторите с --yes (для dirty — --yes --force).",
+            )
+        }
+        if (!proceed) {
+            // User declined — nothing deleted, exit 0 (a cancel is not a failure).
+            terminal.println("Отменено.")
+            return
+        }
+
+        var removed = 0
+        var skippedDirty = 0
+        var alreadyGone = 0 // candidates a concurrent action deleted before us (RemoveStatus.NOT_FOUND)
+        var accounted = 0 // candidates we actually processed (any outcome) — for the reconciliation below
+        val gitErrors = mutableListOf<Pair<CleanCandidate, String>>()
+
+        // Group deletion by repo dir (plan §variant б): open one WorktreeService per repo, then match
+        // candidates to it via its REAL worktree list — correct even when two roots hold same-named
+        // repos (matching goes through this repoDir's git worktree list, not the repo NAME). We take
+        // that list ONCE per repo (not once per candidate) and match in memory (finding 2): the same
+        // `File(path).absoluteFile` comparison findWorktree uses internally.
+        for (repoDir in repos) {
+            val svc = WorktreeService(repoDir)
+            // ONE `git worktree list` per repo. An empty list (e.g. the repo dir vanished between scan
+            // and now → git errors → list() = emptyList()) simply matches no candidate here; the
+            // post-loop reconciliation surfaces any candidate that matched no repo at all (finding 3b).
+            val ownPaths = svc.list().mapTo(HashSet()) { File(it.path).absoluteFile }
+            val own = plan.candidates.filter { File(it.path).absoluteFile in ownPaths }
+            for (c in own) {
+                accounted++
+                if (c.dirty) {
+                    if (!force) {
+                        // Dirty without --force → skip, never delete (safeRemove would say BLOCKED_DIRTY).
+                        skippedDirty++
+                        terminal.println(
+                            brightYellow("⚠ ${c.repo}/${c.label}: пропущен (незакоммиченные изменения; --force для удаления)"),
+                        )
+                        continue
+                    }
+                    // Dirty WITH --force: still a SEPARATE explicit consent per item, decided by the pure
+                    // decideDirtyConsent (finding 4): `--yes --force` = the two explicit flags are consent;
+                    // in a TTY, a per-item prompt; no TTY + no --yes = cannot consent → skip.
+                    val ok = decideDirtyConsent(
+                        assumeYes = assumeYes,
+                        interactive = terminal.terminalInfo.inputInteractive,
+                        ask = {
+                            YesNoPrompt(
+                                "⚠ ${c.repo}/${c.label} (${c.path}): удалить с потерей незакоммиченных изменений?",
+                                terminal,
+                                default = false,
+                            ).ask()
+                        },
+                    )
+                    if (!ok) {
+                        skippedDirty++
+                        terminal.println(brightYellow("⚠ ${c.repo}/${c.label}: пропущен (не подтверждён force)"))
+                        continue
+                    }
+                    applyRemove(svc, c, force = true, onRemoved = { removed++ }, onSkip = { skippedDirty++ }, onGone = { alreadyGone++ }, onError = { gitErrors += c to it })
+                } else {
+                    applyRemove(svc, c, force = false, onRemoved = { removed++ }, onSkip = { skippedDirty++ }, onGone = { alreadyGone++ }, onError = { gitErrors += c to it })
+                }
+            }
+        }
+
+        terminal.println(CleanReport.summary(removed, skippedDirty, gitErrors.size))
+        if (alreadyGone > 0) {
+            // NOT_FOUND at deletion time: someone removed it after the scan. Counted, not lost (finding 3a).
+            terminal.println(gray("Уже удалены (кем-то ещё) до нас: $alreadyGone."))
+        }
+
+        // Reconciliation (finding 3b): a candidate matches no repoDir at all — e.g. its repo directory
+        // vanished between scan and delete, so every repo's `git worktree list` came back without it —
+        // would otherwise fall out of the tally silently. Surface it as diagnostics, not a failure
+        // (exit stays 0 unless there were real git errors).
+        val unmatched = plan.total - accounted
+        if (unmatched > 0) {
+            terminal.println(
+                brightYellow(
+                    "⚠ $unmatched кандидат(ов) не найдены при удалении " +
+                        "(репозиторий, возможно, изменился со времени сканирования).",
+                ),
+            )
+        }
+
+        if (gitErrors.isNotEmpty()) {
+            // A git deletion failure is a real error → non-zero exit, but only AFTER the loop finished
+            // (partial failure never aborts the rest — plan §Атомарность). stderr is surfaced, not swallowed.
+            val detail = gitErrors.joinToString("\n") { (c, err) -> "  ${c.repo}/${c.label}: $err" }
+            throw CliktError("Ошибки git при удалении (${gitErrors.size}):\n$detail")
+        }
+    }
+
+    /**
+     * Runs one [WorktreeService.safeRemove] and dispatches its outcome to the counters/printers.
+     * Kept a helper so the dirty and clean branches share identical outcome handling. Note
+     * [WorktreeService.RemoveStatus.BLOCKED_DIRTY] can still occur even when we thought the candidate
+     * was clean — a race between scan and delete — in which case we skip it (never force silently).
+     * [onGone] fires on [WorktreeService.RemoveStatus.NOT_FOUND] (concurrently removed) so it is
+     * accounted for in the summary rather than silently dropped (finding 3a).
+     */
+    private fun applyRemove(
+        svc: WorktreeService,
+        c: CleanCandidate,
+        force: Boolean,
+        onRemoved: () -> Unit,
+        onSkip: () -> Unit,
+        onGone: () -> Unit,
+        onError: (String) -> Unit,
+    ) {
+        val outcome = svc.safeRemove(c.path, force = force)
+        when (outcome.status) {
+            RemoveStatus.REMOVED -> {
+                onRemoved()
+                terminal.println(brightGreen("✓ Удалён: ${c.repo}/${c.label}"))
+            }
+
+            RemoveStatus.BLOCKED_DIRTY -> {
+                // Race guard fired: it became dirty since the scan. Skip, do not force.
+                onSkip()
+                terminal.println(brightYellow("⚠ ${c.repo}/${c.label}: пропущен (стал dirty; --force для удаления)"))
+            }
+
+            RemoveStatus.NOT_FOUND -> {
+                // Concurrently removed before we got to it — not an error, but count it so it does not
+                // vanish from the summary (finding 3a).
+                onGone()
+                terminal.println(gray("• ${c.repo}/${c.label}: уже удалён"))
+            }
+
+            RemoveStatus.GIT_ERROR ->
+                onError(outcome.result?.stderr?.trim().orEmpty())
+        }
+    }
+
+    companion object {
+        /**
+         * The dirty-deletion consent policy as ONE named, pure decision (finding 4) — extracted so the
+         * safety-critical "may a dirty worktree be deleted here?" question is a single unit-testable
+         * function, not an implicit effect of branch order.
+         *
+         * Consent to destroy uncommitted work is granted ONLY when:
+         *  - [assumeYes] (`--yes --force`): the two explicit flags together ARE the consent (the sole
+         *    non-interactive path to a dirty deletion, plan §UX подтверждения / шаг 6); OR
+         *  - [interactive] and the per-item [ask] prompt returns true.
+         *
+         * Everything else — including no TTY without `--yes`, or an [ask] returning null/false — denies
+         * consent (returns false → the caller skips, never force-deletes). Callers MUST have already
+         * established `--force`; this function does not re-check it (it only decides the per-item consent
+         * once force is in play). Bias is toward NOT deleting, per the safety invariant.
+         *
+         * @param ask invoked only in the interactive branch; returns the prompt's answer (null = aborted).
+         */
+        fun decideDirtyConsent(
+            assumeYes: Boolean,
+            interactive: Boolean,
+            ask: () -> Boolean?,
+        ): Boolean = when {
+            assumeYes -> true
+            interactive -> ask() ?: false
+            else -> false // no TTY, no --yes → cannot consent to a dirty deletion; skip.
         }
     }
 }
@@ -438,5 +756,6 @@ fun main(args: Array<String>) =
         CreateCommand(),
         RemoveCommand(),
         ScanCommand(),
+        CleanCommand(),
         ShellInitCommand(),
     ).main(args)
