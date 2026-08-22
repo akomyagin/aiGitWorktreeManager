@@ -49,6 +49,27 @@ data class ScanResult(
  */
 class ScanService(private val git: GitRunner = RealGitRunner) {
 
+    companion object {
+        /**
+         * Deduplicates [repos] by canonical absolute directory path (`absoluteFile.normalize()`),
+         * keeping the first appearance of each. Needed for multi-root `scan` (Этап 9): one physical
+         * repo reachable from several configured roots must not be aggregated twice — a duplicate
+         * would print its worktrees twice and, if another repo of the same name sat between the two
+         * copies, break `WorktreeTable`'s adjacency-based repo grouping (plan §Р4).
+         *
+         * Pure logic (only `absoluteFile.normalize()`); kept out of [scan] so its flat-list contract
+         * is unchanged for existing callers, and the dedup stays a local, explicit step in the
+         * caller. Symlinks are not resolved (see [MultiRootSelection] doc / plan §Р7).
+         */
+        fun dedupRepos(repos: List<File>): List<File> {
+            val seen = LinkedHashMap<String, File>()
+            for (repo in repos) {
+                seen.putIfAbsent(repo.absoluteFile.normalize().path, repo)
+            }
+            return seen.values.toList()
+        }
+    }
+
     /** Blocking entry point for CLI callers; runs the parallel scan to completion. */
     fun scan(repos: List<File>): ScanResult = runBlocking { scanAsync(repos) }
 

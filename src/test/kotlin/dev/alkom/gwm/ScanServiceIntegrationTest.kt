@@ -176,4 +176,73 @@ class ScanServiceIntegrationTest {
         assertTrue(result.worktrees.isEmpty())
         assertTrue(result.errors.isEmpty())
     }
+
+    // --- Этап 9: dedupRepos (pure logic, no git) --------------------------------------------
+
+    @Test // 9: same dir spelled two ways collapses to one
+    fun `dedupRepos collapses two spellings of the same directory`(@TempDir root: File) {
+        val repo = File(root, "repo").apply { assertTrue(mkdirs()) }
+        val out = ScanService.dedupRepos(listOf(repo, File(root, "repo/")))
+        assertEquals(1, out.size, "'/x/repo' and '/x/repo/' must dedup: $out")
+    }
+
+    @Test // 9: order of first appearance preserved with a mix of uniques and dupes
+    fun `dedupRepos keeps first-appearance order`(@TempDir root: File) {
+        val a = File(root, "a").apply { assertTrue(mkdirs()) }
+        val b = File(root, "b").apply { assertTrue(mkdirs()) }
+        val out = ScanService.dedupRepos(listOf(a, b, File(root, "a/"), b))
+        assertEquals(listOf(a.absoluteFile.normalize().path, b.absoluteFile.normalize().path), out.map { it.absoluteFile.normalize().path })
+    }
+
+    // --- Этап 9: aggregation across multiple roots (real git) --------------------------------
+
+    @Test // 9: two roots, one repo each — worktrees of both aggregate, order = root1 then root2
+    fun `aggregates repos from two separate roots in root order`(@TempDir root1: File, @TempDir root2: File) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+        initRepo(root1, "alpha")
+        initRepo(root2, "zeta")
+
+        val allRepos = listOf(root1, root2).flatMap { RepoScanner.findRepos(it) }
+        val repos = ScanService.dedupRepos(allRepos)
+        val result = ScanService().scan(repos)
+
+        assertTrue(result.errors.isEmpty(), "no repo should error: ${result.errors}")
+        // root1's alpha comes before root2's zeta (roots kept in config order, plan §2).
+        assertEquals(listOf("alpha", "zeta"), result.worktrees.map { it.repo })
+    }
+
+    @Test // 9: one physical repo reachable from two roots (same root listed twice) → dedup to one
+    fun `same repo reachable from two roots is aggregated once`(@TempDir root: File) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+        initRepo(root, "solo")
+
+        // Simulate the same root appearing twice in rootsToScan — the direct test of
+        // "repo reachable from several roots → dedup" (plan §6).
+        val allRepos = listOf(root, root).flatMap { RepoScanner.findRepos(it) }
+        assertEquals(2, allRepos.size, "sanity: pre-dedup the repo appears twice")
+
+        val repos = ScanService.dedupRepos(allRepos)
+        assertEquals(1, repos.size, "dedup must collapse the same physical repo")
+
+        val result = ScanService().scan(repos)
+        assertEquals(1, result.worktrees.count { it.repo == "solo" }, "each worktree must appear once")
+    }
+
+    @Test // 9: two DIFFERENT repos with the same name from two roots — both kept, no crash
+    fun `same-named repos from different roots both appear`(@TempDir root1: File, @TempDir root2: File) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+        initRepo(root1, "foo")
+        initRepo(root2, "foo")
+
+        val allRepos = listOf(root1, root2).flatMap { RepoScanner.findRepos(it) }
+        val repos = ScanService.dedupRepos(allRepos)
+        assertEquals(2, repos.size, "two DIFFERENT repos named foo are not duplicates: $repos")
+
+        val result = ScanService().scan(repos)
+        assertTrue(result.errors.isEmpty(), "no repo should error: ${result.errors}")
+        val foos = result.worktrees.filter { it.repo == "foo" }
+        assertEquals(2, foos.size, "both foo repos' worktrees must be present")
+        // Different physical paths, same displayed name.
+        assertEquals(2, foos.map { it.worktree.path }.toSet().size, "the two foos must have distinct paths")
+    }
 }
