@@ -98,4 +98,90 @@ class MultiRootSelectionTest {
         val sr = resolve(listOf("~/projects"), home = home.path)
         assertEquals(listOf(sub.absoluteFile.normalize()), sr.roots)
     }
+
+    // ── resolveRootsToScan: the shared override-vs-multi-root fork (fix/print-path-multi-root) ──
+    // Pure, no git; $GWM_ROOT is injected via `env` so the process environment is never touched.
+
+    /** An `env` lambda that reports NO $GWM_ROOT — the default for most fork tests. */
+    private val noEnv: (String) -> String? = { null }
+
+    @Test
+    fun `resolveRootsToScan - CLI override to an existing dir is single-root`(@TempDir root: File) {
+        val rr = MultiRootSelection.resolveRootsToScan(root.path, configRoots = emptyList(), env = noEnv)
+        assertTrue(rr.singleRootOverride)
+        assertEquals(listOf(root.absoluteFile), rr.roots)
+        assertTrue(rr.missing.isEmpty())
+        assertTrue(!rr.fellBackToDefaultFromMissing)
+    }
+
+    @Test
+    fun `resolveRootsToScan - GWM_ROOT counts as an override even when chosen is null`(@TempDir root: File) {
+        val env: (String) -> String? = { if (it == "GWM_ROOT") root.path else null }
+        val rr = MultiRootSelection.resolveRootsToScan(chosen = null, configRoots = listOf("/ignored"), env = env)
+        assertTrue(rr.singleRootOverride, "GWM_ROOT must trigger the override branch")
+        assertEquals(listOf(root.absoluteFile), rr.roots)
+        assertTrue(rr.missing.isEmpty(), "config.roots must be ignored under an override: ${rr.missing}")
+    }
+
+    @Test
+    fun `resolveRootsToScan - override to a missing dir yields empty roots (caller decides)`(@TempDir tmp: File) {
+        val ghost = File(tmp, "nope").path
+        val rr = MultiRootSelection.resolveRootsToScan(ghost, configRoots = emptyList(), env = noEnv)
+        assertTrue(rr.singleRootOverride)
+        assertTrue(rr.roots.isEmpty(), "a missing override root must be empty, not a throw: ${rr.roots}")
+    }
+
+    @Test
+    fun `resolveRootsToScan - multi-root aggregates every existing config root`(@TempDir a: File, @TempDir b: File) {
+        val rr = MultiRootSelection.resolveRootsToScan(chosen = null, configRoots = listOf(a.path, b.path), env = noEnv)
+        assertTrue(!rr.singleRootOverride)
+        assertEquals(listOf(a.absoluteFile.normalize(), b.absoluteFile.normalize()), rr.roots)
+        assertTrue(rr.missing.isEmpty())
+        assertTrue(!rr.fellBackToDefaultFromMissing)
+    }
+
+    @Test
+    fun `resolveRootsToScan - partial multi-root keeps existing, reports missing`(@TempDir a: File, @TempDir tmp: File) {
+        val ghost = File(tmp, "gone").path
+        val rr = MultiRootSelection.resolveRootsToScan(chosen = null, configRoots = listOf(a.path, ghost), env = noEnv)
+        assertEquals(listOf(a.absoluteFile.normalize()), rr.roots)
+        assertEquals(listOf(ghost), rr.missing)
+        assertTrue(!rr.fellBackToDefaultFromMissing, "some root existed — no default fallback")
+    }
+
+    @Test // all config roots missing → default fallback + fellBack flag. Pins user.home to a @TempDir
+    // with Projects/ai-projects created, else it only passes where the dev's own default root exists.
+    fun `resolveRootsToScan - all config roots missing falls back to default and flags it`(
+        @TempDir tmp: File,
+        @TempDir fakeHome: File,
+    ) {
+        val defaultRoot = File(fakeHome, "Projects/ai-projects").apply { assertTrue(mkdirs()) }
+        val g1 = File(tmp, "gone1").path
+        val g2 = File(tmp, "gone2").path
+        val originalHome = System.getProperty("user.home")
+        System.setProperty("user.home", fakeHome.path)
+        try {
+            val rr = MultiRootSelection.resolveRootsToScan(chosen = null, configRoots = listOf(g1, g2), env = noEnv, home = fakeHome.path)
+            assertEquals(listOf(defaultRoot.absoluteFile.normalize()), rr.roots)
+            assertTrue(rr.fellBackToDefaultFromMissing, "non-blank-but-missing config must flag the fallback")
+            assertEquals(listOf(g1, g2), rr.missing)
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
+    }
+
+    @Test // empty config → silent default (no fellBack flag).
+    fun `resolveRootsToScan - empty config is a silent default`(@TempDir fakeHome: File) {
+        val defaultRoot = File(fakeHome, "Projects/ai-projects").apply { assertTrue(mkdirs()) }
+        val originalHome = System.getProperty("user.home")
+        System.setProperty("user.home", fakeHome.path)
+        try {
+            val rr = MultiRootSelection.resolveRootsToScan(chosen = null, configRoots = emptyList(), env = noEnv, home = fakeHome.path)
+            assertEquals(listOf(defaultRoot.absoluteFile.normalize()), rr.roots)
+            assertTrue(!rr.fellBackToDefaultFromMissing, "an empty config is a silent default, no warning")
+            assertTrue(rr.missing.isEmpty())
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
+    }
 }

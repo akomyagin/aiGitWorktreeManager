@@ -30,6 +30,9 @@ import dev.alkom.gwm.scan.RootChoice
 import dev.alkom.gwm.scan.RootSelection
 import dev.alkom.gwm.scan.ScanService
 import dev.alkom.gwm.scan.WorktreeMatcher
+import dev.alkom.gwm.scan.formatAllRootsMissingWarning
+import dev.alkom.gwm.scan.formatMissingRootsWarning
+import dev.alkom.gwm.scan.reposToScan
 import dev.alkom.gwm.ui.InteractiveScreen
 import dev.alkom.gwm.ui.ShellInit
 import dev.alkom.gwm.ui.TableColors
@@ -101,7 +104,7 @@ class Gwm : CliktCommand(name = "gwm") {
         val query = printPath ?: return
         // Machine-readable path resolution; prints exactly the path to stdout or throws a
         // CliktError (stderr + non-zero exit). See PrintPath.emit for the WHY.
-        PrintPath.emit(query, root, config.primaryRoot())
+        PrintPath.emit(query, root, config)
     }
 }
 
@@ -119,11 +122,33 @@ class Gwm : CliktCommand(name = "gwm") {
  * not emit a blank line, because `cd "$(...)"` on empty output can drop the user in $HOME. A
  * [CliktError] writes to stderr and exits non-zero, so the wrapper's `&&`-guard suppresses
  * the `cd` entirely (see [ShellInit]).
+ *
+ * WHY it is now multi-root (fix/print-path-multi-root): it shares [MultiRootSelection.resolveRootsToScan]
+ * with `scan`, so with no CLI/`$GWM_ROOT` override it resolves the fuzzy query over worktrees
+ * aggregated from EVERY existing `config.roots` entry — `gwm cd <repo-in-a-second-root>` now reaches
+ * repos beyond `roots[0]`, matching what `gwm scan` already shows. The stdout contract above is
+ * unchanged: multi-root diagnostics (skipped/missing roots) go to **stderr** (never stdout), and a
+ * missing root still just yields no match → [CliktError], not a crash.
  */
 object PrintPath {
-    fun emit(query: String, root: String?, configRoot: String? = null) {
-        val rootDir = RepoScanner.resolveRoot(root, configRoot)
-        val repos = RepoScanner.findRepos(rootDir)
+    fun emit(query: String, root: String?, config: GwmConfig) {
+        // `root` = the root command's `--root` (the only CLI root source on the root command; there
+        // is no positional ROOT / `scan --root` here). Reduce it to `chosen` the same way scan reduces
+        // its three sources, then use the shared fork so print-path aggregates exactly like scan.
+        val chosen = root?.takeIf { it.isNotBlank() }
+        val rr = MultiRootSelection.resolveRootsToScan(chosen, config.roots)
+        // Diagnostics go to STDERR, never stdout: `cd "$(gwm --print-path ...)"` captures stdout, so a
+        // warning there would corrupt the emitted path (see the class doc). A missing root is NOT an
+        // error here — an empty repo list falls through to Match.None → CliktError below.
+        if (!rr.singleRootOverride) {
+            if (rr.missing.isNotEmpty() && rr.roots.isNotEmpty()) {
+                System.err.println(formatMissingRootsWarning(rr.missing))
+            }
+            if (rr.fellBackToDefaultFromMissing) {
+                System.err.println(formatAllRootsMissingWarning(rr.missing))
+            }
+        }
+        val repos = rr.reposToScan()
         val worktrees = ScanService().scan(repos).worktrees
 
         when (val match = WorktreeMatcher.resolve(worktrees, query)) {
@@ -292,8 +317,9 @@ class RemoveCommand : CliktCommand(name = "remove") {
  * [ScanService.dedupRepos]. Missing/broken config roots WARN (stderr, exit 0) but never abort — the
  * only non-zero exits remain a CLI-root conflict and a broken config (plan §Р5).
  *
- * `--print-path` is intentionally left single-root in this stage (it still uses `roots[0]` via
- * [GwmConfig.primaryRoot]); aligning it is deferred tech-debt (plan §Р7).
+ * `--print-path` shares this exact fork — [MultiRootSelection.resolveRootsToScan] — so it aggregates
+ * worktrees from every existing `config.roots` entry the same way this command does (see [PrintPath]'s
+ * KDoc for its side of the contract: stderr diagnostics, stdout untouched).
  */
 class ScanCommand : CliktCommand(name = "scan") {
     // Three ways to give the root — positional ROOT, `scan --root`, and the root command's
@@ -328,67 +354,40 @@ class ScanCommand : CliktCommand(name = "scan") {
             )
         }
 
-        // A CLI root or $GWM_ROOT means the user pointed at ONE concrete root — stay single-root
-        // (Этап 7/8 behaviour). Only when nothing explicit is given does config.roots drive a real
-        // multi-root scan (Этап 9, Р1). $GWM_ROOT is read here (not just resolveRoot) so it counts
-        // as an override for the fork decision even though it isn't a RootSelection conflict source.
-        val hasSingleRootOverride = chosen != null || !System.getenv("GWM_ROOT").isNullOrBlank()
-
-        // rootsToScan = the roots actually aggregated; base = the single anchor for relative paths
-        // (null when several roots have no common base — PathDisplay then shows ~/… or absolute, Р6).
-        val rootsToScan: List<File>
-        val base: File?
-        if (hasSingleRootOverride) {
-            // Single-root override. configRoot is deliberately null here: either `chosen != null` or
-            // $GWM_ROOT is set, both of which outrank config by definition of this branch (plan §Р2).
-            val rootDir = RepoScanner.resolveRoot(chosen, configRoot = null)
-            if (!rootDir.isDirectory) {
-                throw CliktError("Корень портфеля не найден или не директория: ${rootDir.path}")
-            }
-            rootsToScan = listOf(rootDir)
-            base = rootDir
-        } else {
-            // Multi-root branch: aggregate every existing root from config.roots (plan §Р1/Р3/Р5).
-            val configRoots = globals?.config?.roots.orEmpty()
-            val sr = MultiRootSelection.resolveScanRoots(configRoots)
-            if (sr.missing.isNotEmpty() && sr.roots.isNotEmpty()) {
-                terminal.println(
-                    brightYellow(
-                        "⚠ пропущены несуществующие корни из конфига: ${sr.missing.joinToString(", ")}",
-                    ),
+        // Resolve the roots to scan via the shared override-vs-multi-root fork (Этап 9 Р1; the same
+        // helper now backs --print-path). It returns roots + diagnostics and does no I/O itself, so
+        // scan renders the diagnostics its own way: warnings to stdout (terminal.println), a missing
+        // single/default root as a CliktError. See MultiRootSelection.resolveRootsToScan / ResolvedRoots.
+        val rr = MultiRootSelection.resolveRootsToScan(chosen, globals?.config?.roots.orEmpty())
+        if (rr.singleRootOverride) {
+            if (rr.roots.isEmpty()) {
+                // The explicit CLI/env root does not exist — same hard error as Этап 7/8. rejectedSingleRoot
+                // is the File resolveRootsToScan already resolved internally — no need to re-resolve it here.
+                throw CliktError(
+                    "Корень портфеля не найден или не директория: ${rr.rejectedSingleRoot?.path}",
                 )
             }
-            rootsToScan = if (sr.roots.isEmpty()) {
-                // No usable config root. If some were configured but none exist, warn (a stale/typo'd
-                // entry otherwise gives no signal it was ignored — generalises Этап 8's warning);
-                // an empty config is the normal default with no warning (plan §Р5, §Р8). Whether the
-                // config was "really" non-empty is judged by sr.missing (post blank-filtering), not
-                // the raw configRoots list — an all-blank roots array must read as "no config", same
-                // as an empty one, not as "all configured roots missing".
-                if (sr.missing.isNotEmpty()) {
-                    terminal.println(
-                        brightYellow(
-                            "⚠ ни один из корней в конфиге (${sr.missing.joinToString(", ")}) не найден — используется корень по умолчанию.",
-                        ),
-                    )
-                }
-                val defaultRoot = RepoScanner.defaultRoot()
-                if (!defaultRoot.isDirectory) {
-                    throw CliktError("Корень портфеля не найден или не директория: ${defaultRoot.path}")
-                }
-                listOf(defaultRoot)
-            } else {
-                sr.roots
+        } else {
+            // A stale/typo'd config entry otherwise gives no signal it was ignored — generalises
+            // Этап 8's warning (plan §Р5, §Р8). exit stays 0.
+            if (rr.missing.isNotEmpty() && rr.roots.isNotEmpty()) {
+                terminal.println(brightYellow(formatMissingRootsWarning(rr.missing)))
             }
-            // One root → anchor relative paths to it (identical to Этап 8, keeps output byte-stable);
-            // several → no common base, PathDisplay falls back to ~/… or absolute (Р6).
-            val singleRoot = rootsToScan.singleOrNull()
-            base = singleRoot
+            if (rr.fellBackToDefaultFromMissing) {
+                terminal.println(brightYellow(formatAllRootsMissingWarning(rr.missing)))
+            }
+            if (rr.roots.isEmpty()) {
+                // Multi-root branch fell back to the default, but even that doesn't exist (Этап 9 bug 1).
+                throw CliktError("Корень портфеля не найден или не директория: ${RepoScanner.defaultRoot().path}")
+            }
         }
+        val rootsToScan = rr.roots
+        // One root → anchor relative paths to it (identical to Этап 8, keeps output byte-stable);
+        // several → no common base, PathDisplay falls back to ~/… or absolute (Р6).
+        val base: File? = rootsToScan.singleOrNull()
 
         // Collect repos from every root, then dedup a physical repo reachable from >1 root (Р3/Р4).
-        val allRepos = rootsToScan.flatMap { RepoScanner.findRepos(it) }
-        val repos = ScanService.dedupRepos(allRepos)
+        val repos = rr.reposToScan()
         if (repos.isEmpty()) {
             val where = rootsToScan.joinToString(", ") { it.path }
             terminal.println(brightYellow("Git-репозитории не найдены в: $where"))
