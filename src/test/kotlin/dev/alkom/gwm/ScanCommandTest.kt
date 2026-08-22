@@ -166,14 +166,27 @@ class ScanCommandTest {
     }
 
     @Test // 9 — all config roots missing: warn naming both, fall through to default, exit 0
-    fun `all multi-root config roots missing warns and falls back`(@TempDir cfgDir: File) {
+    // Falls through to the REAL default root (~/Projects/ai-projects), so `user.home` is pinned to a
+    // @TempDir with that subdir created — otherwise this only passes on machines where the dev's own
+    // default root happens to exist (it doesn't on a fresh CI runner; see bug 1 fix, Р8).
+    fun `all multi-root config roots missing warns and falls back`(
+        @TempDir cfgDir: File,
+        @TempDir fakeHome: File,
+    ) {
+        File(fakeHome, "Projects/ai-projects").mkdirs()
         val g1 = File(cfgDir, "gone1").path
         val g2 = File(cfgDir, "gone2").path
         val cfg = File(cfgDir, "config.toml").apply { writeText("roots = [\"$g1\", \"$g2\"]\n") }
-        val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE)
-        assertEquals(0, r.statusCode, "missing roots are a warning, not a failure: ${r.output}")
-        assertTrue("не найден" in r.output, "must warn: ${r.output}")
-        assertTrue(g1 in r.output && g2 in r.output, "both missing roots must be named: ${r.output}")
+        val originalHome = System.getProperty("user.home")
+        System.setProperty("user.home", fakeHome.path)
+        try {
+            val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE)
+            assertEquals(0, r.statusCode, "missing roots are a warning, not a failure: ${r.output}")
+            assertTrue("не найден" in r.output, "must warn: ${r.output}")
+            assertTrue(g1 in r.output && g2 in r.output, "both missing roots must be named: ${r.output}")
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
     }
 
     @Test // 9 — partial: one existing + one missing → warn about missing, still scan the existing
