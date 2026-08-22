@@ -27,6 +27,10 @@ data class GwmConfig(
      * of them exist / the list is empty. "First existing" — not "first" — so a stale entry in a
      * shared config doesn't shadow a later valid root (plan §6 case 16). Returns the expanded
      * absolute-ish path string; [RepoScanner.resolveRoot] does the final absolute resolution.
+     *
+     * NOTE (fix/print-path-multi-root): no production caller remains — `scan` went multi-root in
+     * Этап 9 and `--print-path` followed, both via [dev.alkom.gwm.scan.MultiRootSelection]. Kept for
+     * its unit test and as a small pure helper; a candidate for removal if nothing starts using it.
      */
     fun primaryRoot(home: String = System.getProperty("user.home")): String? =
         roots.asSequence()
