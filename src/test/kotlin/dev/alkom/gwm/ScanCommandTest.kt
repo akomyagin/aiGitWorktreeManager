@@ -119,6 +119,145 @@ class ScanCommandTest {
         assertTrue("chartreuse" in r.output, "must name the unknown color: ${r.output}")
     }
 
+    /** Build a minimal real git repo named [name] under [parent] with one commit on `main`. */
+    private fun makeRepo(parent: File, name: String): File {
+        val dir = File(parent, name).apply { mkdirs() }
+        GitCommand.run(dir, "init", "-b", "main")
+        GitCommand.run(dir, "config", "user.email", "t@e.com")
+        GitCommand.run(dir, "config", "user.name", "T")
+        File(dir, "README.md").writeText("hi\n")
+        GitCommand.run(dir, "add", "README.md")
+        GitCommand.run(dir, "commit", "-m", "init")
+        return dir
+    }
+
+    @Test // 9 — multi-root from config, no CLI root: both roots aggregated into one output
+    fun `multi-root from config aggregates all existing roots`(
+        @TempDir root1: File,
+        @TempDir root2: File,
+        @TempDir cfgDir: File,
+    ) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+        makeRepo(root1, "alpha")
+        makeRepo(root2, "zeta")
+        val cfg = File(cfgDir, "config.toml").apply {
+            writeText("roots = [\"${root1.path}\", \"${root2.path}\"]\n")
+        }
+        val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE, width = 200)
+        assertEquals(0, r.statusCode, r.output)
+        assertTrue("корней" in r.output, "must signal multiplicity: ${r.output}")
+        assertTrue(root1.path in r.output && root2.path in r.output, "both roots must be listed: ${r.output}")
+    }
+
+    @Test // 9 — CLI --root overrides multi-root config entirely
+    fun `explicit --root overrides multi-root config`(
+        @TempDir cfgRoot1: File,
+        @TempDir cfgRoot2: File,
+        @TempDir cliRoot: File,
+        @TempDir cfgDir: File,
+    ) {
+        val cfg = File(cfgDir, "config.toml").apply {
+            writeText("roots = [\"${cfgRoot1.path}\", \"${cfgRoot2.path}\"]\n")
+        }
+        val r = app().test("--config=${cfg.path} --root=${cliRoot.path} scan", ansiLevel = AnsiLevel.NONE)
+        assertEquals(0, r.statusCode, r.output)
+        assertTrue(cliRoot.path in r.output, "must use the CLI root: ${r.output}")
+        assertTrue(cfgRoot1.path !in r.output && cfgRoot2.path !in r.output, "config roots must not appear: ${r.output}")
+    }
+
+    @Test // 9 — all config roots missing: warn naming both, fall through to default, exit 0
+    // Falls through to the REAL default root (~/Projects/ai-projects), so `user.home` is pinned to a
+    // @TempDir with that subdir created — otherwise this only passes on machines where the dev's own
+    // default root happens to exist (it doesn't on a fresh CI runner; see bug 1 fix, Р8).
+    fun `all multi-root config roots missing warns and falls back`(
+        @TempDir cfgDir: File,
+        @TempDir fakeHome: File,
+    ) {
+        File(fakeHome, "Projects/ai-projects").mkdirs()
+        val g1 = File(cfgDir, "gone1").path
+        val g2 = File(cfgDir, "gone2").path
+        val cfg = File(cfgDir, "config.toml").apply { writeText("roots = [\"$g1\", \"$g2\"]\n") }
+        val originalHome = System.getProperty("user.home")
+        System.setProperty("user.home", fakeHome.path)
+        try {
+            val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE)
+            assertEquals(0, r.statusCode, "missing roots are a warning, not a failure: ${r.output}")
+            assertTrue("не найден" in r.output, "must warn: ${r.output}")
+            assertTrue(g1 in r.output && g2 in r.output, "both missing roots must be named: ${r.output}")
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
+    }
+
+    @Test // 9 — partial: one existing + one missing → warn about missing, still scan the existing
+    fun `partial multi-root warns about the missing one but scans the existing`(
+        @TempDir root1: File,
+        @TempDir cfgDir: File,
+    ) {
+        assumeTrue(gitAvailable(), "git not available on PATH")
+        makeRepo(root1, "alpha")
+        val ghost = File(cfgDir, "gone").path
+        val cfg = File(cfgDir, "config.toml").apply {
+            writeText("roots = [\"${root1.path}\", \"$ghost\"]\n")
+        }
+        val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE, width = 200)
+        assertEquals(0, r.statusCode, r.output)
+        assertTrue("пропущены" in r.output, "must warn about the skipped root: ${r.output}")
+        assertTrue(ghost in r.output, "the skipped root must be named: ${r.output}")
+        assertTrue(root1.path in r.output, "the existing root must still be scanned: ${r.output}")
+    }
+
+    @Test // regression: no config roots at all (and no CLI/env override) + missing default root
+    // must fail non-zero, not silently print "не найдены" and exit 0 (bug 1 fix — Р8 exit-code
+    // regression). `defaultRoot()` reads `user.home` directly with no injection point, so we
+    // temporarily point `user.home` at a location with no "Projects/ai-projects" subdir.
+    fun `no config and missing default root fails non-zero, does not silently succeed`(@TempDir fakeHome: File) {
+        val originalHome = System.getProperty("user.home")
+        System.setProperty("user.home", fakeHome.path)
+        try {
+            val r = app().test("scan", ansiLevel = AnsiLevel.NONE)
+            assertTrue(r.statusCode != 0, "missing default root must be non-zero, not a silent no-op: ${r.output}")
+            assertTrue(
+                "не найден" in r.output || "не директория" in r.output,
+                "must report the missing root, not just 'not found repos': ${r.output}",
+            )
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
+    }
+
+    @Test // regression: config.roots present but all entries blank must behave as "no config" —
+    // silent default fallback, no "ни один из корней... не найден" warning (bug 3 fix).
+    fun `config roots of only blank entries is treated as empty config, no warning`(
+        @TempDir cfgDir: File,
+        @TempDir realDefaultHome: File,
+    ) {
+        val defaultRoot = File(realDefaultHome, "Projects/ai-projects").apply { assertTrue(mkdirs()) }
+        val cfg = File(cfgDir, "config.toml").apply { writeText("roots = [\"\", \"   \"]\n") }
+        val originalHome = System.getProperty("user.home")
+        System.setProperty("user.home", realDefaultHome.path)
+        try {
+            val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE)
+            assertEquals(0, r.statusCode, r.output)
+            assertTrue(
+                "ни один из корней" !in r.output,
+                "blank-only roots must read as no-config, not as all-missing: ${r.output}",
+            )
+            assertTrue(defaultRoot.path in r.output, "must fall through to the default root: ${r.output}")
+        } finally {
+            System.setProperty("user.home", originalHome)
+        }
+    }
+
+    @Test // 9 — single config root: output stays single-root (no "N корней"), backwards compatible
+    fun `single config root stays single-root output`(@TempDir cfgRoot: File, @TempDir cfgDir: File) {
+        val cfg = File(cfgDir, "config.toml").apply { writeText("roots = [\"${cfgRoot.path}\"]\n") }
+        val r = app().test("--config=${cfg.path} scan", ansiLevel = AnsiLevel.NONE)
+        assertEquals(0, r.statusCode, r.output)
+        assertTrue(cfgRoot.path in r.output, "must scan the single config root: ${r.output}")
+        assertTrue("корней" !in r.output, "single root must not use the multi-root header: ${r.output}")
+    }
+
     @Test // 41
     fun `real temp portfolio at width 80 - every line at most 80`(@TempDir root: File) {
         assumeTrue(gitAvailable(), "git not available on PATH")

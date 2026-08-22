@@ -23,6 +23,7 @@ import dev.alkom.gwm.config.Colors
 import dev.alkom.gwm.config.GwmConfig
 import dev.alkom.gwm.git.WorktreeService
 import dev.alkom.gwm.git.WorktreeService.RemoveStatus
+import dev.alkom.gwm.scan.MultiRootSelection
 import dev.alkom.gwm.scan.RepoScanner
 import dev.alkom.gwm.scan.RootCandidate
 import dev.alkom.gwm.scan.RootChoice
@@ -275,6 +276,25 @@ class RemoveCommand : CliktCommand(name = "remove") {
     }
 }
 
+/**
+ * `gwm scan` — aggregated worktree overview across the whole portfolio.
+ *
+ * **Multi-root trigger (Этап 9, Р1).** Multi-root scanning is enabled ONLY when no CLI root source
+ * is given (no positional `ROOT`, no `scan --root`, no root `gwm --root`) AND `$GWM_ROOT` is unset.
+ * In that case `scan` aggregates EVERY existing directory in `config.roots` into one output. Any
+ * explicit CLI input or `$GWM_ROOT` stays a single-root override — explicit user input = one concrete
+ * root — which keeps backwards compatibility with Этапы 7/8. Multi-root lives BELOW the
+ * [RootSelection] CLI-conflict gate: a divergence of explicit CLI roots is still a hard error; the
+ * union of silent config roots happens only when the CLI gave nothing (see [MultiRootSelection]).
+ *
+ * Duplicate roots (same path written twice, `/x` vs `/x/`, `~/p` vs `$HOME/p`) collapse in
+ * [MultiRootSelection]; a single physical repo reachable from two roots collapses in
+ * [ScanService.dedupRepos]. Missing/broken config roots WARN (stderr, exit 0) but never abort — the
+ * only non-zero exits remain a CLI-root conflict and a broken config (plan §Р5).
+ *
+ * `--print-path` is intentionally left single-root in this stage (it still uses `roots[0]` via
+ * [GwmConfig.primaryRoot]); aligning it is deferred tech-debt (plan §Р7).
+ */
 class ScanCommand : CliktCommand(name = "scan") {
     // Three ways to give the root — positional ROOT, `scan --root`, and the root command's
     // `--root` (via context.obj). Clikt parses options after the subcommand token with the
@@ -308,35 +328,86 @@ class ScanCommand : CliktCommand(name = "scan") {
             )
         }
 
-        // The config's roots[0] is a SILENT fallback (below CLI + $GWM_ROOT), NOT a RootSelection
-        // conflict source — that keeps "explicit flag beats config" without a config+flag user
-        // hitting a false conflict error (plan §Р2 / §3).
-        val configRoots = globals?.config?.roots.orEmpty()
-        val configRoot = globals?.config?.primaryRoot()
-        // configRoots is non-empty but none of them exist AND nothing else would override it —
-        // about to silently fall through to the hard default. A stale/typo'd config entry
-        // otherwise gives no signal at all that it was ignored (found in review).
-        if (chosen == null && configRoot == null && configRoots.isNotEmpty() && System.getenv("GWM_ROOT").isNullOrBlank()) {
-            terminal.println(
-                brightYellow(
-                    "⚠ ни один из корней в конфиге (${configRoots.joinToString(", ")}) не найден — используется корень по умолчанию.",
-                ),
-            )
+        // A CLI root or $GWM_ROOT means the user pointed at ONE concrete root — stay single-root
+        // (Этап 7/8 behaviour). Only when nothing explicit is given does config.roots drive a real
+        // multi-root scan (Этап 9, Р1). $GWM_ROOT is read here (not just resolveRoot) so it counts
+        // as an override for the fork decision even though it isn't a RootSelection conflict source.
+        val hasSingleRootOverride = chosen != null || !System.getenv("GWM_ROOT").isNullOrBlank()
+
+        // rootsToScan = the roots actually aggregated; base = the single anchor for relative paths
+        // (null when several roots have no common base — PathDisplay then shows ~/… or absolute, Р6).
+        val rootsToScan: List<File>
+        val base: File?
+        if (hasSingleRootOverride) {
+            // Single-root override. configRoot is deliberately null here: either `chosen != null` or
+            // $GWM_ROOT is set, both of which outrank config by definition of this branch (plan §Р2).
+            val rootDir = RepoScanner.resolveRoot(chosen, configRoot = null)
+            if (!rootDir.isDirectory) {
+                throw CliktError("Корень портфеля не найден или не директория: ${rootDir.path}")
+            }
+            rootsToScan = listOf(rootDir)
+            base = rootDir
+        } else {
+            // Multi-root branch: aggregate every existing root from config.roots (plan §Р1/Р3/Р5).
+            val configRoots = globals?.config?.roots.orEmpty()
+            val sr = MultiRootSelection.resolveScanRoots(configRoots)
+            if (sr.missing.isNotEmpty() && sr.roots.isNotEmpty()) {
+                terminal.println(
+                    brightYellow(
+                        "⚠ пропущены несуществующие корни из конфига: ${sr.missing.joinToString(", ")}",
+                    ),
+                )
+            }
+            rootsToScan = if (sr.roots.isEmpty()) {
+                // No usable config root. If some were configured but none exist, warn (a stale/typo'd
+                // entry otherwise gives no signal it was ignored — generalises Этап 8's warning);
+                // an empty config is the normal default with no warning (plan §Р5, §Р8). Whether the
+                // config was "really" non-empty is judged by sr.missing (post blank-filtering), not
+                // the raw configRoots list — an all-blank roots array must read as "no config", same
+                // as an empty one, not as "all configured roots missing".
+                if (sr.missing.isNotEmpty()) {
+                    terminal.println(
+                        brightYellow(
+                            "⚠ ни один из корней в конфиге (${sr.missing.joinToString(", ")}) не найден — используется корень по умолчанию.",
+                        ),
+                    )
+                }
+                val defaultRoot = RepoScanner.defaultRoot()
+                if (!defaultRoot.isDirectory) {
+                    throw CliktError("Корень портфеля не найден или не директория: ${defaultRoot.path}")
+                }
+                listOf(defaultRoot)
+            } else {
+                sr.roots
+            }
+            // One root → anchor relative paths to it (identical to Этап 8, keeps output byte-stable);
+            // several → no common base, PathDisplay falls back to ~/… or absolute (Р6).
+            val singleRoot = rootsToScan.singleOrNull()
+            base = singleRoot
         }
-        val rootDir = RepoScanner.resolveRoot(chosen, configRoot)
-        if (!rootDir.isDirectory) {
-            throw CliktError("Корень портфеля не найден или не директория: ${rootDir.path}")
-        }
-        val repos = RepoScanner.findRepos(rootDir)
+
+        // Collect repos from every root, then dedup a physical repo reachable from >1 root (Р3/Р4).
+        val allRepos = rootsToScan.flatMap { RepoScanner.findRepos(it) }
+        val repos = ScanService.dedupRepos(allRepos)
         if (repos.isEmpty()) {
-            terminal.println(brightYellow("Git-репозитории не найдены в: ${rootDir.path}"))
+            val where = rootsToScan.joinToString(", ") { it.path }
+            terminal.println(brightYellow("Git-репозитории не найдены в: $where"))
             return
         }
 
-        terminal.println(bold("Портфель: ${rootDir.path} (${repos.size} репо)"))
+        // Header: one root reads as Этап 8 (path + count); several announce multiplicity + the list
+        // of roots actually scanned, so the user never wonders what was aggregated (Р6).
+        val singleRoot = rootsToScan.singleOrNull()
+        if (singleRoot != null) {
+            terminal.println(bold("Портфель: ${singleRoot.path} (${repos.size} репо)"))
+        } else {
+            terminal.println(bold("Портфель: ${rootsToScan.size} корней, ${repos.size} репо"))
+            rootsToScan.forEach { terminal.println(gray("  ${it.path}")) }
+        }
+
         val result = ScanService().scan(repos)
         terminal.println(
-            WorktreeTable.renderAggregated(result.worktrees, rootDir, terminal.size.width, tableColors(globals, terminal)),
+            WorktreeTable.renderAggregated(result.worktrees, base, terminal.size.width, tableColors(globals, terminal)),
         )
 
         // Broken repos are reported separately so a partial scan still shows the rest.
