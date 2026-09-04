@@ -15,9 +15,10 @@ docs/                    # PLAN, TECHNICAL_PLAN, POST_MVP_PLAN
 .claude/skills/          # kotlin-worktree-tui-dev — конвенции разработки этого инструмента
 src/main/kotlin/dev/alkom/gwm/
 ├── Main.kt              # Clikt entrypoint + подкоманды (тонкий слой UI)
-├── git/                 # GitCommand (ProcessBuilder), Worktree, WorktreeParser, WorktreeService
-├── scan/                # (Фаза 2) обход корня репозиториев, агрегация, orphaned-эвристики
-└── ui/                  # (Этап 1+) интерактивные экраны Mordant
+├── git/                 # GitCommand (ProcessBuilder), Worktree, WorktreeParser, WorktreeService, orphaned/ahead-behind
+├── config/              # (Этап 8) config.toml: TomlLite, GwmConfig, WorktreePathTemplate, Colors
+├── scan/                # (Фаза 2+) обход корней, агрегация, orphaned, мульти-корень (Этап 9), bulk-clean (Этап 10)
+└── ui/                  # (Этап 1+) интерактивные экраны Mordant + рендер таблиц/путей
 src/test/kotlin/         # юнит-тесты (парсер) + интеграционные (временный git-репо, с Этапа 1)
 build.gradle.kts, settings.gradle.kts, gradle.properties
 ```

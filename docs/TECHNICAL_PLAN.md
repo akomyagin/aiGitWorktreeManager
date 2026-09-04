@@ -45,9 +45,10 @@ src/main/kotlin/dev/alkom/gwm/
 │   ├── GitCommand.kt       # ProcessBuilder-обёртка: git с рабочей директорией + таймаутом
 │   ├── Worktree.kt         # доменная модель одного worktree
 │   ├── WorktreeParser.kt   # ЧИСТАЯ функция: парсит `git worktree list --porcelain`
-│   └── WorktreeService.kt  # операции над одним репо: list/withDirtyFlags/add/remove/prune
-├── scan/                   # (Фаза 2) обход корня репозиториев, агрегация, orphaned-эвристики
-└── ui/                     # (Этап 1+) интерактивные экраны Mordant (выбор строки, диалоги)
+│   └── WorktreeService.kt  # операции над одним репо: list/withDirtyFlags/add/remove/prune + orphaned/ahead-behind
+├── config/                 # (Этап 8) опциональный config.toml: TomlLite-парсер, GwmConfig, шаблон пути, цвета
+├── scan/                   # (Фаза 2+) обход корней, агрегация, orphaned-эвристики, мульти-корень (Этап 9), bulk-clean (Этап 10)
+└── ui/                     # (Этап 1+) интерактивные экраны Mordant + рендер таблиц/путей/возраста
 ```
 
 **Ключевой принцип:** `WorktreeParser` не знает ни про процессы, ни про терминал — на входе строка `--porcelain`, на выходе `List<Worktree>`. Это самая хрупкая и самая важная логика, и она полностью покрывается юнит-тестами (`WorktreeParserTest`). `GitCommand`/`WorktreeService` — тонкие обёртки над реальным git; для них — интеграционные тесты на временном репозитории (появятся на Этапе 1+).
@@ -93,7 +94,7 @@ src/main/kotlin/dev/alkom/gwm/
 
 ## 7. Разбивка по Этапам (технически)
 
-Все Этапы MVP (0–6) реализованы, покрыты тестами и смержены в `master`. Ниже — что именно сделано на каждом, с точкой входа в код.
+Все Этапы MVP (0–6) и пост-MVP (7–10) реализованы, покрыты тестами и смержены в `master`. Ниже — что именно сделано на каждом, с точкой входа в код.
 
 - **Этап 0 (сделано ✅):** Gradle-скелет, `application`-плагин, `GitCommand`/`Worktree`/`WorktreeParser`/`WorktreeService`, команда `gwm list <repo>` с Mordant-таблицей, юнит-тесты парсера. `./gradlew build` зелёный.
 - **Этап 1 (сделано ✅):** интерактивный список (Mordant `interactiveSelectList`), навигация стрелками, выбор worktree; экраны вынесены в `ui/InteractiveScreen.kt` + `ui/WorktreeTable.kt`. Команда `gwm interactive`. Форматирование строк (`rowLabel`/`entryKey`) — чистые функции, покрыты `InteractiveScreenTest`.

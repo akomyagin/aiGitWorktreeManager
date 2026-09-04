@@ -10,9 +10,10 @@ import java.io.File
  * the config existed (plan §Р2, point 2). The config only ever *lowers* into fallbacks; an
  * explicit CLI flag or `$GWM_ROOT` always wins.
  *
- * @param roots                scan-root candidates; on Этап 8 only the first EXISTING one is used
- *                             (single-root scan), but the array shape is fixed now so the config
- *                             doesn't have to change when multi-root lands (see [primaryRoot])
+ * @param roots                scan-root candidates; since Этап 9, `scan`/`--print-path` aggregate
+ *                             ALL existing roots (multi-root) unless an explicit CLI root or
+ *                             `$GWM_ROOT` overrides to single-root (see [primaryRoot], now
+ *                             prod-caller-free — kept as a tested helper)
  * @param worktreePathTemplate template for `gwm create`'s default path, or null for the built-in
  *                             `{parent}/{repo}-{branch}` (see [WorktreePathTemplate])
  * @param colors               semantic status color roles, resolved in [Colors]

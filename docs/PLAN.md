@@ -35,7 +35,7 @@
 
 Терминология «Этап N» — по аналогии с соседними проектами портфеля. Этап 0 = bootstrap.
 
-> **Статус: MVP готов ✅.** Все Этапы 0–6 (Фаза 1 + Фаза 2) реализованы, покрыты тестами и смержены в `master` (PR #1–#4). Команды `gwm`: `list`, `interactive`, `create`, `remove`, `scan`, `shell-init` + корневая опция `--print-path`.
+> **Статус: MVP готов ✅ + пост-MVP Этапы 7–10 ✅.** Все Этапы 0–6 (Фаза 1 + Фаза 2) реализованы, покрыты тестами и смержены в `master` (PR #1–#4); поверх них смержены пост-MVP Этапы 7–10 (PR #5–#12). Команды `gwm`: `list`, `interactive`, `create`, `remove`, `scan`, `clean`, `shell-init` + корневая опция `--print-path`.
 
 ### Этап 0 — Bootstrap ✅
 Инициализация репозитория: документация (`PLAN`/`TECHNICAL_PLAN`/`POST_MVP_PLAN`), `CLAUDE.md`, skill, скелет Gradle-проекта, минимальный `Main.kt` с командой `list`, парсер `git worktree list --porcelain` + юнит-тесты. Сборка `./gradlew build` — зелёная.
@@ -64,6 +64,8 @@
 | Этап 8, PR 1/3 — конфиг-файл | ✅ | Опциональный `~/.config/gwm/config.toml` (`--config <path>` для переопределения): корень портфеля как тихий fallback (`roots[0]`, ниже `$GWM_ROOT`), шаблон пути `gwm create`, цветовая схема статусов. Ручной парсер минимального TOML-подмножества, без новой зависимости. Точки входа: `config/TomlLite.kt`, `config/GwmConfig.kt`, `config/Colors.kt`, `config/WorktreePathTemplate.kt` |
 | Этап 8, PR 2/3 — группировка `scan` | ✅ | Имя репо в колонке «Репозиторий» повторяется только на первой строке группы worktree одного репо, остальные строки — пустая ячейка (`ui/WorktreeTable.kt`, `OverviewRow.repoIsGroupStart`). Порядок строк не меняется |
 | Этап 8, PR 3/3 — ahead/behind + возраст | ✅ | Две новые колонки в `scan`: `↑↓` (коммиты ahead/behind upstream) и «Возраст» (последний коммит, локаль-независимо). Выбрасываются по ширине РАНЬШЕ «Репозиторий»/«Orphaned». +2 git-вызова на worktree, без регресса `scan` на реальном портфеле. Точки входа: `git/AheadBehind.kt`, `ui/AgeFormat.kt`, `WorktreeService.withAheadBehindAndAge`, переписанная лестница `ui/TableLayout.kt`. Этап 8 закрыт всеми тремя PR |
+| Этап 9 — мульти-корневой `scan` | ✅ | `scan` без явного `--root`/`$GWM_ROOT` агрегирует worktree ВСЕХ существующих корней из `config.roots` в один вывод (не только `roots[0]`); любой явный CLI-корень/`$GWM_ROOT` остаётся однокорневым override. `--print-path`/`gwm cd` выровнены на ту же развилку (`fix/print-path-multi-root`) — fuzzy-запрос резолвится по всем корням, shell-контракт stdout цел (диагностика в stderr). Дедуп корней и репозиториев по `absoluteFile.normalize()`, несуществующие корни → warning (exit 0). Точки входа: `scan/MultiRootSelection.kt`, `ScanService.dedupRepos`, `ScanCommand`/`PrintPath` в `Main.kt`. PR #10, #11 |
+| Этап 10 — bulk-удаление orphaned (`gwm clean`) | ✅ | Первая разрушающая bulk-операция: находит orphaned worktree по всему портфелю и удаляет за один прогон, строго по явному подтверждению (агрегированный `[y/N]`/`--yes`). Dirty защищён отдельно (`--force` + per-item подтверждение или `--yes --force`; одно общее «да» dirty не удаляет), `main` никогда не кандидат. Точки входа: `scan/BulkCleanPlan.kt` (отбор кандидатов `orphan.isOrphaned && !isMain`), `ui/CleanReport.kt`, `CleanCommand` в `Main.kt`. PR #12 |
 
 Детальный технический план, обоснование выбора TUI-технологии и разбор каждого Этапа — в [`TECHNICAL_PLAN.md`](./TECHNICAL_PLAN.md). Границы и идеи «на потом» — в [`POST_MVP_PLAN.md`](./POST_MVP_PLAN.md).
 
